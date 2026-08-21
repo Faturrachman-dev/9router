@@ -200,7 +200,7 @@ export default function RequestDetailsTab() {
           <span className="text-xs text-text-muted">
             {isTruncated
               ? `Truncated from ${(originalSize / 1024).toFixed(1)}KB`
-              : `~${(JSON.stringify(displayData || {}).length / 1024).toFixed(1)}KB`}
+              : (()=>{const n=JSON.stringify(displayData||{}).length;return n<1024?`${n} B`:`~${(n/1024).toFixed(1)}KB`;})()}
           </span>
           {isTruncated && !fullData && (
             <button onClick={() => fetchFullBody(detailId, suffix)} disabled={isLoading} className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 disabled:opacity-50">
