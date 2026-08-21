@@ -42,6 +42,7 @@ Merging upstream stacks regressions. Recurring recipe:
   after editing, `POST :7788/api/config/reload` THEN restart the service.
 - Full 5-regression writeup + verified fixes → Engram #220.
 - Rebuild-speed debug + nft/build-phase-guard fixes → `docs/TROUBLESHOOTING.md` + Engram #222.
+- Usage Details gotchas (redacted sizing, suffix _preq/_pres, TruncatedSection scope, Cost/Latency order) → `docs/TROUBLESHOOTING.md` + Engram #223.
 
 ## What persists vs. what's build-specific
 - **SQLite DB** (`%APPDATA%\9router\db\data.sqlite`) is shared across both builds —

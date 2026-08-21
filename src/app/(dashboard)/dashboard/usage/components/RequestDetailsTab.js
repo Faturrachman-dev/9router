@@ -186,29 +186,44 @@ export default function RequestDetailsTab() {
     const key = suffix || detailId;
     const isTruncated = data?._truncated === true;
     const originalSize = data?._originalSize;
+    const isRedacted = data && typeof data === "object" && data.redacted === true;
     const source = bodySources[key];
     const fullData = fullBodies[key];
     const isLoading = loadingFull[key];
     const isPreview = source === "sqlite-preview";
     const displayData = fullData || data;
+    const isRedactedPreview = isRedacted && !fullData;
+    const sizeLabel = (() => {
+      if (isTruncated) return `Truncated from ${(originalSize / 1024).toFixed(1)}KB`;
+      if (fullData) {
+        const n = JSON.stringify(fullData).length;
+        return n < 1024 ? `${n} B` : `~${(n/1024).toFixed(1)}KB`;
+      }
+      if (isRedactedPreview) return isLoading ? "Fetching..." : "~—";
+      const n = JSON.stringify(displayData || {}).length;
+      return n < 1024 ? `${n} B` : `~${(n/1024).toFixed(1)}KB`;
+    })();
+    useEffect(() => {
+      if (isRedactedPreview && !isLoading) fetchFullBody(detailId, suffix);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isRedactedPreview]);
     return (
       <CollapsibleSection title={title} defaultOpen={defaultOpen} icon={icon}>
         <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-          {type === 'text' && typeof displayData === 'string' ? displayData : JSON.stringify(displayData, null, 2)}
+          {isRedactedPreview ? (isLoading ? "Fetching full body..." : "Click Show Full / Download to load redacted body") : (type === 'text' && typeof displayData === 'string' ? displayData : JSON.stringify(displayData, null, 2))}
         </pre>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-text-muted">
-            {isTruncated
-              ? `Truncated from ${(originalSize / 1024).toFixed(1)}KB`
-              : (()=>{const n=JSON.stringify(displayData||{}).length;return n<1024?`${n} B`:`~${(n/1024).toFixed(1)}KB`;})()}
-          </span>
-          {isTruncated && !fullData && (
+          <span className="text-xs text-text-muted">{sizeLabel}</span>
+          {isRedactedPreview && !isLoading && !fullData && (
+            <button onClick={() => fetchFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10">Show Full</button>
+          )}
+          {isTruncated && !fullData && !isRedactedPreview && (
             <button onClick={() => fetchFullBody(detailId, suffix)} disabled={isLoading} className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 disabled:opacity-50">
               {isLoading ? "Loading..." : "Show Full"}
             </button>
           )}
           {isTruncated && fullData && isPreview && <span className="text-xs text-amber-600 dark:text-amber-400">Full body not cached (pre-feature request) — showing SQLite preview</span>}
-          {data && <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>}
+          <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
         </div>
       </CollapsibleSection>
     );
