@@ -55,41 +55,6 @@ function CollapsibleSection({ title, children, defaultOpen = false, icon = null 
   const [isOpen, setIsOpen] = useState(defaultOpen);
   
 
-  const TruncatedSection = ({ title, data, icon, defaultOpen, detailId, suffix, type }) => {
-    const key = suffix || detailId;
-    const isTruncated = data?._truncated === true;
-    const originalSize = data?._originalSize;
-    const source = bodySources[key];
-    const fullData = fullBodies[key];
-    const isLoading = loadingFull[key];
-    const isPreview = source === "sqlite-preview";
-    const displayData = fullData || data;
-    return (
-      <CollapsibleSection title={title} defaultOpen={defaultOpen} icon={icon}>
-        <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-          {type === 'text' && typeof displayData === 'string' ? displayData : JSON.stringify(displayData, null, 2)}
-        </pre>
-        {isTruncated && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span className="text-xs text-text-muted">Truncated from {(originalSize / 1024).toFixed(1)}KB</span>
-            {!fullData && (
-              <button onClick={() => fetchFullBody(detailId, suffix)} disabled={isLoading} className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 disabled:opacity-50">
-                {isLoading ? "Loading..." : "Show Full"}
-              </button>
-            )}
-            {fullData && isPreview && <span className="text-xs text-amber-600 dark:text-amber-400">Full body not cached (pre-feature request) — showing SQLite preview</span>}
-            <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
-          </div>
-        )}
-        {!isTruncated && data && (
-          <div className="mt-2">
-            <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
-          </div>
-        )}
-      </CollapsibleSection>
-    );
-  };
-
   return (
     <div className="border border-black/5 dark:border-white/5 rounded-lg overflow-hidden">
       <button 
@@ -217,6 +182,41 @@ export default function RequestDetailsTab() {
   const handleClearFilters = () => {
     setFilters({ provider: "", startDate: "", endDate: "" });
   };
+  const TruncatedSection = ({ title, data, icon, defaultOpen, detailId, suffix, type }) => {
+    const key = suffix || detailId;
+    const isTruncated = data?._truncated === true;
+    const originalSize = data?._originalSize;
+    const source = bodySources[key];
+    const fullData = fullBodies[key];
+    const isLoading = loadingFull[key];
+    const isPreview = source === "sqlite-preview";
+    const displayData = fullData || data;
+    return (
+      <CollapsibleSection title={title} defaultOpen={defaultOpen} icon={icon}>
+        <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
+          {type === 'text' && typeof displayData === 'string' ? displayData : JSON.stringify(displayData, null, 2)}
+        </pre>
+        {isTruncated && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-text-muted">Truncated from {(originalSize / 1024).toFixed(1)}KB</span>
+            {!fullData && (
+              <button onClick={() => fetchFullBody(detailId, suffix)} disabled={isLoading} className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 disabled:opacity-50">
+                {isLoading ? "Loading..." : "Show Full"}
+              </button>
+            )}
+            {fullData && isPreview && <span className="text-xs text-amber-600 dark:text-amber-400">Full body not cached (pre-feature request) — showing SQLite preview</span>}
+            <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
+          </div>
+        )}
+        {!isTruncated && data && (
+          <div className="mt-2">
+            <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
+          </div>
+        )}
+      </CollapsibleSection>
+    );
+  };
+
   const fetchFullBody = async (detailId, suffix) => {
     const key = suffix || detailId;
     if (fullBodies[key] || loadingFull[key]) return;
@@ -341,7 +341,7 @@ export default function RequestDetailsTab() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
+                  <td colSpan="10" className="p-8 text-center text-text-muted">
                     <div className="flex items-center justify-center gap-2">
                       <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
                       Loading...
@@ -350,7 +350,7 @@ export default function RequestDetailsTab() {
                 </tr>
               ) : details.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
+                  <td colSpan="10" className="p-8 text-center text-text-muted">
                     No request details found
                   </td>
                 </tr>
@@ -383,13 +383,13 @@ export default function RequestDetailsTab() {
                     <td className="p-4 text-sm text-text-main text-right font-mono">
                       {detail.tokens?.completion_tokens?.toLocaleString() || 0}
                     </td>
+                    <td className="p-4 text-sm text-text-main text-right font-mono">${(typeof detail.cost === "number" ? detail.cost : 0).toFixed(6)}</td>
                     <td className="p-4 text-sm text-text-muted">
                       <div className="flex flex-col gap-0.5">
                         <div>TTFT: <span className="font-mono">{detail.latency?.ttft || 0}ms</span></div>
                         <div>Total: <span className="font-mono">{detail.latency?.total || 0}ms</span></div>
                       </div>
                     </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">${(typeof detail.cost === "number" ? detail.cost : 0).toFixed(6)}</td>
                     <td className="p-4 text-center">
                       <Button
                         variant="outline"
