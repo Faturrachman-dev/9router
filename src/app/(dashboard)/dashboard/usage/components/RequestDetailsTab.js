@@ -196,23 +196,20 @@ export default function RequestDetailsTab() {
         <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
           {type === 'text' && typeof displayData === 'string' ? displayData : JSON.stringify(displayData, null, 2)}
         </pre>
-        {isTruncated && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span className="text-xs text-text-muted">Truncated from {(originalSize / 1024).toFixed(1)}KB</span>
-            {!fullData && (
-              <button onClick={() => fetchFullBody(detailId, suffix)} disabled={isLoading} className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 disabled:opacity-50">
-                {isLoading ? "Loading..." : "Show Full"}
-              </button>
-            )}
-            {fullData && isPreview && <span className="text-xs text-amber-600 dark:text-amber-400">Full body not cached (pre-feature request) — showing SQLite preview</span>}
-            <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
-          </div>
-        )}
-        {!isTruncated && data && (
-          <div className="mt-2">
-            <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
-          </div>
-        )}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-text-muted">
+            {isTruncated
+              ? `Truncated from ${(originalSize / 1024).toFixed(1)}KB`
+              : `~${(JSON.stringify(displayData || {}).length / 1024).toFixed(1)}KB`}
+          </span>
+          {isTruncated && !fullData && (
+            <button onClick={() => fetchFullBody(detailId, suffix)} disabled={isLoading} className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 disabled:opacity-50">
+              {isLoading ? "Loading..." : "Show Full"}
+            </button>
+          )}
+          {isTruncated && fullData && isPreview && <span className="text-xs text-amber-600 dark:text-amber-400">Full body not cached (pre-feature request) — showing SQLite preview</span>}
+          {data && <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>}
+        </div>
       </CollapsibleSection>
     );
   };
@@ -536,11 +533,7 @@ export default function RequestDetailsTab() {
             )}
 
             <div className="space-y-4">
-              <CollapsibleSection title="1. Client Request (Input)" defaultOpen={true} icon="input">
-                <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                  {JSON.stringify(selectedDetail.request, null, 2)}
-                </pre>
-              </CollapsibleSection>
+              <TruncatedSection title="1. Client Request (Input)" defaultOpen={true} icon="input" data={selectedDetail.request} detailId={selectedDetail.id} suffix={selectedDetail.id} />
 
               {selectedDetail.providerRequest && (
                 <TruncatedSection title="2. Provider Request (Translated)" icon="translate" data={selectedDetail.providerRequest} detailId={selectedDetail.id} suffix={`${selectedDetail.id}_preq`} />
