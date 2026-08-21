@@ -543,11 +543,11 @@ export default function RequestDetailsTab() {
               </CollapsibleSection>
 
               {selectedDetail.providerRequest && (
-                <TruncatedSection title="2. Provider Request (Translated)" icon="translate" data={selectedDetail.providerRequest} detailId={selectedDetail.id} suffix={`${selectedDetail.id}:providerRequest`} />
+                <TruncatedSection title="2. Provider Request (Translated)" icon="translate" data={selectedDetail.providerRequest} detailId={selectedDetail.id} suffix={`${selectedDetail.id}_preq`} />
               )}
 
               {selectedDetail.providerResponse && (
-                <TruncatedSection title="3. Provider Response (Raw)" icon="data_object" data={selectedDetail.providerResponse} detailId={selectedDetail.id} suffix={`${selectedDetail.id}:providerResponse`} />
+                <TruncatedSection title="3. Provider Response (Raw)" icon="data_object" data={selectedDetail.providerResponse} detailId={selectedDetail.id} suffix={`${selectedDetail.id}_pres`} />
               )}
               
               <CollapsibleSection title="4. Client Response (Final)" defaultOpen={true} icon="output">
