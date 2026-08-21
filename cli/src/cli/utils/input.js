@@ -90,25 +90,45 @@ async function pause(message = "Press Enter to continue...") {
  * arrow-key escape sequence leaks on macOS.
  */
 async function selectMenu(title, items, defaultIndex = 0, subtitle = "", headerContent = "", breadcrumb = []) {
+  // PowerShell (PSReadLine) intercepts raw mode at the console driver level —
+  // keypress events never fire and typed chars echo directly to the terminal.
+  const inPowerShell = process.platform === "win32" && !!process.env.PSModulePath;
+  const useLineFallback = !process.stdin.isTTY || inPowerShell;
+
+  const printHeader = () => {
+    process.stdout.write("\x1b[2J\x1b[H");
+    const width = Math.min(process.stdout.columns || 40, 40);
+    console.log(`\n${COLORS.terracotta}${"=".repeat(width)}${COLORS.reset}`);
+    console.log(`  ${COLORS.bright}${COLORS.terracotta}${title}${COLORS.reset}`);
+    if (subtitle) console.log(`  ${COLORS.dim}${subtitle}${COLORS.reset}`);
+    console.log(`${COLORS.terracotta}${"=".repeat(width)}${COLORS.reset}`);
+    if (breadcrumb.length > 0) console.log(`  ${COLORS.dim}${breadcrumb.join(" > ")}${COLORS.reset}`);
+    console.log();
+    if (headerContent) { console.log(headerContent); console.log(); }
+  };
+
+  if (useLineFallback) {
+    printHeader();
+    items.forEach((item, index) => console.log(`  ${index + 1}. ${item.label}`));
+    console.log();
+    while (true) {
+      const answer = await prompt(`Select (1-${items.length}): `);
+      const num = parseInt(answer, 10);
+      if (!isNaN(num) && num >= 1 && num <= items.length) return num - 1;
+      console.log(`Please enter a number between 1 and ${items.length}.`);
+    }
+  }
+
+  // Raw-mode arrow-key navigation (cmd.exe, macOS, Linux)
   return new Promise((resolve) => {
     let selectedIndex = defaultIndex;
     let isActive = true;
 
     primeRawOnce();
-    if (!process.stdin.isTTY) { resolve(-1); return; }
 
     const renderMenu = () => {
       if (!isActive) return;
-      process.stdout.write("\x1b[2J\x1b[H");
-      const width = Math.min(process.stdout.columns || 40, 40);
-      console.log(`\n${COLORS.terracotta}${"=".repeat(width)}${COLORS.reset}`);
-      console.log(`  ${COLORS.bright}${COLORS.terracotta}${title}${COLORS.reset}`);
-      if (subtitle) console.log(`  ${COLORS.dim}${subtitle}${COLORS.reset}`);
-      console.log(`${COLORS.terracotta}${"=".repeat(width)}${COLORS.reset}`);
-      if (breadcrumb.length > 0) console.log(`  ${COLORS.dim}${breadcrumb.join(" > ")}${COLORS.reset}`);
-      console.log();
-      if (headerContent) { console.log(headerContent); console.log(); }
-
+      printHeader();
       const isWin = process.platform === "win32";
       items.forEach((item, index) => {
         const isSelected = index === selectedIndex;

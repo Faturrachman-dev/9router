@@ -75,3 +75,11 @@ gitbook/README.md
 
 # Refactor backup reference (do not bundle/lint)
 open-sse.old/
+# local runtime logs (personal)
+boot.log
+build.log
+9router-boot.log
+9router-run.log
+9router-menu.log
+tmp_b64.txt
+.pi-subagents/

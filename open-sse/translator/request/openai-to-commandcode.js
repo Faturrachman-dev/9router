@@ -14,6 +14,7 @@ import { FORMATS } from "../formats.js";
 import { randomUUID } from "crypto";
 import { ROLE, OPENAI_BLOCK } from "../schema/index.js";
 import { DEFAULT_MAX_TOKENS } from "../../config/runtimeConfig.js";
+import { parseDataUri } from "../concerns/image.js";
 
 function flattenText(content) {
   if (content == null) return "";
@@ -41,7 +42,17 @@ function toContentBlocks(content) {
         if (part.type === OPENAI_BLOCK.TEXT && typeof part.text === "string") {
           blocks.push({ type: OPENAI_BLOCK.TEXT, text: part.text });
         } else if (part.type === OPENAI_BLOCK.IMAGE_URL || part.type === OPENAI_BLOCK.IMAGE) {
-          blocks.push({ type: OPENAI_BLOCK.TEXT, text: "[image omitted]" });
+          // Map to CommandCode's AI SDK v5 image content block ({type:"image", image, mediaType}).
+          // data: URIs are split into raw base64 + mediaType; remote URLs pass through as-is.
+          const url = typeof part.image_url === "string"
+            ? part.image_url
+            : (part.image_url?.url || part.image || "");
+          const parsed = typeof url === "string" && url.startsWith("data:") ? parseDataUri(url) : null;
+          if (parsed) {
+            blocks.push({ type: "image", image: parsed.base64, mediaType: parsed.mimeType });
+          } else if (url) {
+            blocks.push({ type: "image", image: url });
+          }
         } else if (typeof part.text === "string") {
           blocks.push({ type: OPENAI_BLOCK.TEXT, text: part.text });
         }

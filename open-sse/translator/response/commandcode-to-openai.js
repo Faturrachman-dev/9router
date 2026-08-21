@@ -165,9 +165,23 @@ export function commandCodeToOpenAIResponse(chunk, state) {
       break;
     }
     case "error": {
+      // Reached only when the upstream error arrives mid-stream (content already
+      // flowed, so the 200 is committed and can't be turned into a 5xx — the
+      // pre-content case is caught earlier in commandcode.js and returned as 502).
+      // Surface the most readable message we can; CommandCode's backend sometimes
+      // pre-mangles the nested message to "[object Object]", so prefer type then.
       state.finishReason = OPENAI_FINISH.STOP;
       const errVal = event.error ?? event.message ?? "unknown";
-      const errStr = typeof errVal === "string" ? errVal : JSON.stringify(errVal);
+      let errStr;
+      if (typeof errVal === "string") {
+        errStr = errVal;
+      } else if (errVal && typeof errVal === "object") {
+        errStr = (errVal.message && errVal.message !== "[object Object]")
+          ? errVal.message
+          : (errVal.type || JSON.stringify(errVal));
+      } else {
+        errStr = String(errVal);
+      }
       out.push(makeChunk(state, { content: `\n\n[CommandCode error: ${errStr}]` }));
       out.push(makeChunk(state, {}, OPENAI_FINISH.STOP));
       break;

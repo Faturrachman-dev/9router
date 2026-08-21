@@ -398,6 +398,7 @@ Default URLs:
     </tr>
   </table>
   <p><i>...and 20+ more providers including Nebius, Chutes, Hyperbolic, and custom OpenAI/Anthropic compatible endpoints</i></p>
+  <p><i>📖 <a href="docs/tabbit-proxy.md">Multi-connection setup guide</a> for custom compatible endpoints with per-connection baseUrls (e.g., Tabbit proxy pool)</i></p>
 </div>
 
 ---

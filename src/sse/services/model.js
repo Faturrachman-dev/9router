@@ -17,6 +17,23 @@ for (const entry of REGISTRY) {
 }
 
 export function parseModel(modelStr) {
+  const CLAUDE_CLI_MODEL_MAP = {
+    "claude-opus-4-8": "agentrouter-claude-opus-4-6",
+    "claude-sonnet-4-6": "tabbit/Claude-Haiku-4.5",
+    "claude-haiku-4-5": "tabbit/Claude-Haiku-4.5",
+    "claude-3-5-sonnet-20241022": "tabbit/Claude-Haiku-4.5",
+    "claude-3-5-sonnet": "tabbit/Claude-Haiku-4.5",
+    "claude-3-opus-20240229": "agentrouter-claude-opus-4-6",
+    "claude-3-opus": "agentrouter-claude-opus-4-6",
+    "claude-3-haiku-20240307": "tabbit/Claude-Haiku-4.5",
+    "claude-3-haiku": "tabbit/Claude-Haiku-4.5",
+    "claude-3-7-sonnet": "tabbit/Claude-Haiku-4.5",
+    "claude-3-7-sonnet-20250219": "tabbit/Claude-Haiku-4.5"
+  };
+  if (CLAUDE_CLI_MODEL_MAP[modelStr]) {
+    modelStr = CLAUDE_CLI_MODEL_MAP[modelStr];
+  }
+
   const parsed = parseModelCore(modelStr);
   if (parsed?.providerAlias && LOCAL_PROVIDER_ALIASES[parsed.providerAlias]) {
     return { ...parsed, provider: LOCAL_PROVIDER_ALIASES[parsed.providerAlias] };
@@ -75,7 +92,7 @@ export async function getModelInfo(modelStr) {
     return { provider: null, model: parsed.model };
   }
 
-  return getModelInfoCore(modelStr, getModelAliases);
+  return getModelInfoCore(parsed.model, getModelAliases);
 }
 
 /**

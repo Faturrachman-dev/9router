@@ -1,3 +1,20 @@
+# Unreleased (2026-08-18)
+
+## Features
+- **Tabbit proxy "Reseed" button** (Services page) — one-click session refresh for a
+  Tabbit proxy: (re)launches its Sandboxie box headful with the CDP debug port
+  (terminate-first, to avoid the attach-without-debug bind failure), restarts the
+  proxy so it re-harvests a fresh ~7-day token, then runs a **real completion probe**
+  (not just a port bind), with a settle-delay + single retry to cover the cold-box
+  login race. Shown for services that expose a CDP port. `serviceManager.js`
+  (`ensureBoxUp`/`completionProbe`/`reseedService`) + `action:"reseed"` in the admin
+  services route.
+
+## Fixes
+- **Services**: refactored `startService`/`stopService` into lock-free `_startInner`/
+  `_stopInner` (public fns still wrap with the per-service lock) so composite actions
+  like reseed don't self-deadlock on the lock.
+
 # v0.5.4 (2026-06-18)
 
 ## Fixes

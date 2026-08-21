@@ -75,6 +75,64 @@ export function openaiToClaudeResponse(chunk, state) {
   const choice = chunk.choices[0];
   const delta = choice.delta;
 
+  // Initialize and emit prefill if present
+  if (state && state.body && !state.prefillInitialized && (state.model?.includes?.("claude-opus-4-6") || state.model?.includes?.("gpt-5.5"))) {
+    state.prefillInitialized = true;
+    const messages = state.body.messages;
+    if (Array.isArray(messages) && messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg && lastMsg.role === "assistant") {
+        let prefillText = "";
+        if (typeof lastMsg.content === "string") {
+          prefillText = lastMsg.content;
+        } else if (Array.isArray(lastMsg.content)) {
+          prefillText = lastMsg.content
+            .filter(c => c.type === "text")
+            .map(c => c.text)
+            .join("");
+        }
+        if (prefillText) {
+          state.prefillText = prefillText;
+          state.prefillBuffer = prefillText;
+          state.prefillToEmit = prefillText;
+        }
+      }
+    }
+  }
+
+  if (state?.prefillToEmit) {
+    state.textBlockIndex = state.nextBlockIndex++;
+    state.textBlockStarted = true;
+    state.textBlockClosed = false;
+    results.push({
+      type: "content_block_start",
+      index: state.textBlockIndex,
+      content_block: { type: CLAUDE_BLOCK.TEXT, text: "" }
+    });
+    results.push({
+      type: "content_block_delta",
+      index: state.textBlockIndex,
+      delta: { type: "text_delta", text: state.prefillToEmit }
+    });
+    state.prefillToEmit = null; // Clear so it only sends once
+  }
+
+  // Deduplicate prefill from model output
+  if (delta?.content && state?.prefillBuffer) {
+    let content = delta.content;
+    let i = 0;
+    while (i < content.length && state.prefillBuffer.length > 0) {
+      if (content[i] === state.prefillBuffer[0]) {
+        state.prefillBuffer = state.prefillBuffer.slice(1);
+        i++;
+      } else {
+        state.prefillBuffer = ""; // Mismatch, stop matching
+        break;
+      }
+    }
+    delta.content = content.slice(i);
+  }
+
   // Track usage from OpenAI chunk if available
   if (chunk.usage && typeof chunk.usage === "object") {
     const promptTokens = typeof chunk.usage.prompt_tokens === "number" ? chunk.usage.prompt_tokens : 0;

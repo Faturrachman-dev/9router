@@ -9,7 +9,7 @@ import { getProviderConnections, getCombos, getCustomModels, getModelAliases } f
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
-import { capabilitiesFromServiceKind } from "open-sse/providers/capabilities.js";
+import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -281,7 +281,7 @@ export async function buildModelsList(kindFilter) {
           )
         : providerModels.map((model) => model.id);
 
-      if (isCompatibleProvider && rawModelIds.length === 0 && !UPSTREAM_CONNECTION_RE.test(providerId)) {
+      if (isCompatibleProvider && rawModelIds.length === 0) {
         rawModelIds = await fetchCompatibleModelIds(conn);
       }
 
@@ -406,7 +406,33 @@ export async function buildModelsList(kindFilter) {
     dedupedModels.push(model);
   }
 
-  return dedupedModels;
+  // Capability enrichment — attach the resolved capabilities (esp. vision → `input`
+  // modalities) so OpenAI-compatible clients can gate image input correctly without
+  // re-deriving it. Skips web/combo entries (they carry an explicit `kind`) and any
+  // model that already has capabilities from a custom-model service kind.
+  for (const model of dedupedModels) {
+    if (model.kind || model.owned_by === "combo") continue;
+    if (model.capabilities?.vision !== undefined) {
+      if (!model.input) model.input = model.capabilities.vision ? ["text", "image"] : ["text"];
+      continue;
+    }
+    const caps = getCapabilitiesForModel(model.owned_by, model.id);
+    model.input = caps.vision ? ["text", "image"] : ["text"];
+    model.capabilities = {
+      vision: caps.vision,
+      reasoning: caps.reasoning,
+      search: caps.search,
+      pdf: caps.pdf,
+      audioInput: caps.audioInput,
+      videoInput: caps.videoInput,
+      imageOutput: caps.imageOutput,
+      audioOutput: caps.audioOutput,
+      contextWindow: caps.contextWindow,
+      maxOutput: caps.maxOutput,
+    };
+  }
+
+  return dedupedModels.sort((a, b) => (a.id || '').toLowerCase().localeCompare((b.id || '').toLowerCase()));
 }
 
 /**
@@ -427,8 +453,9 @@ export async function OPTIONS() {
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
  */
 export async function GET() {
-  try {
-    const data = await buildModelsList([LLM_KIND]);
+  try {  const data = await buildModelsList([LLM_KIND]);
+    // Sort by ID alphabetically
+    data.sort((a, b) => (a.id || '').toLowerCase().localeCompare((b.id || '').toLowerCase()));
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });

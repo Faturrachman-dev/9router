@@ -4,6 +4,7 @@ const { spawn, exec, execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
+const http = require("http");
 const os = require("os");
 
 // Native spinner - no external dependency
@@ -89,6 +90,9 @@ let noBrowser = false;
 let skipUpdate = false;
 let showLog = false;
 let trayMode = false;
+let devMode = false;
+let cmdAction = null;
+let cmdArg = null;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--port" || args[i] === "-p") {
@@ -106,9 +110,29 @@ for (let i = 0; i < args.length; i++) {
   } else if (args[i] === "--tray" || args[i] === "-t") {
     trayMode = true;
     process.env.TRAY_MODE = "1";
+  } else if (args[i] === "--dev" || args[i] === "-d") {
+    devMode = true;
+  } else if (args[i] === "--rebuild") {
+    cmdAction = "rebuild";
+  } else if (args[i] === "--restart") {
+    cmdAction = "restart";
+  } else if (args[i] === "--stop") {
+    cmdAction = "stop";
+  } else if (args[i] === "--status") {
+    cmdAction = "status";
+  } else if (args[i] === "--svc-status") {
+    cmdAction = "svc-status";
+  } else if (args[i] === "--svc-start") {
+    cmdAction = "svc-start";
+    cmdArg = args[i + 1];
+    i++;
+  } else if (args[i] === "--svc-stop") {
+    cmdAction = "svc-stop";
+    cmdArg = args[i + 1];
+    i++;
   } else if (args[i] === "--help" || args[i] === "-h") {
     console.log(`
-Usage: ${APP_NAME} [options]
+Usage: ${APP_NAME} [options] [command]
 
 Options:
   -p, --port <port>   Port to run the server (default: ${DEFAULT_PORT})
@@ -116,15 +140,180 @@ Options:
   -n, --no-browser    Don't open browser automatically
   -l, --log           Show server logs (default: hidden)
   -t, --tray          Run in system tray mode (background)
+  -d, --dev           Dev mode — HMR on :20127 (edit without rebuild)
   --skip-update       Skip auto-update check
   -h, --help          Show this help message
   -v, --version       Show version
+
+Commands:
+  --rebuild           Stop, rebuild, restart (full build cycle)
+  --restart           Stop + start (no rebuild)
+  --stop              Stop 9Router on port 20128
+  --status            Show running/stopped status
+  --svc-status        List all managed services
+  --svc-start <id>    Start a service (e.g. tabbit-gmail2)
+  --svc-stop  <id>    Stop a service
 `);
     process.exit(0);
   } else if (args[i] === "--version" || args[i] === "-v") {
     console.log(pkg.version);
     process.exit(0);
   }
+}
+
+// ── Dev mode — hot-reload server on :20127 (no rebuild needed) ────────────
+if (devMode) {
+  const DEV_PORT = 20127;
+  const sourceDir = path.resolve(__dirname, "..");
+
+  console.log(`Dev mode: http://127.0.0.1:${DEV_PORT} (HMR on, edit src/ files freely)`);
+  console.log(`Production stays on :20128. Stop with Ctrl+C when done.\n`);
+
+  const child = spawn(process.execPath, [path.join(sourceDir, "node_modules", ".bin", process.platform === "win32" ? "next.cmd" : "next"), "dev", "--webpack", "--port", String(DEV_PORT)], {
+    cwd: sourceDir,
+    stdio: "inherit",
+    env: { ...process.env, DATA_DIR: path.join(os.homedir(), "AppData", "Roaming", "9router-dev") },
+    shell: true,
+  });
+  child.on("exit", () => process.exit(0));
+  process.on("SIGINT", () => child.kill());
+  return;
+}
+
+// ── Command dispatch (non-server actions) ────────────────────────────────────
+if (cmdAction) {
+  const NINEROUTER_DIR = path.resolve(__dirname, "..");
+  const PORT = 20128;
+
+  async function svcApi(action, svcId) {
+    const body = JSON.stringify(svcId ? { action, service: svcId } : { action });
+    const res = await fetch(`http://127.0.0.1:${PORT}/api/v1/admin/services`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
+      signal: AbortSignal.timeout(10000),
+    });
+    return res.json();
+  }
+
+  async function svcStatus() {
+    const res = await fetch(`http://127.0.0.1:${PORT}/api/v1/admin/services`, { signal: AbortSignal.timeout(5000) });
+    return res.json();
+  }
+
+  async function main() {
+    if (cmdAction === "rebuild") {
+      console.log("=== 9Router Rebuild ===");
+
+      // Stop
+      console.log("Stopping...");
+      try {
+        if (process.platform === "win32") {
+          const { stdout } = require("child_process").execSync(`powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort ${PORT} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"`, { encoding: "utf8", windowsHide: true, timeout: 5000 });
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, 2000));
+      console.log("Stopped.");
+
+      // Build
+      console.log("Building (next build)...");
+      const buildResult = require("child_process").spawnSync("npm", ["run", "build"], {
+        cwd: NINEROUTER_DIR,
+        stdio: "inherit",
+        shell: true,
+        windowsHide: true,
+      });
+      if (buildResult.status !== 0) {
+        console.error("BUILD FAILED");
+        process.exit(1);
+      }
+      console.log("Build complete.");
+
+      // Sync static assets
+      console.log("Syncing static assets...");
+      const fs = require("fs");
+      fs.mkdirSync(path.join(NINEROUTER_DIR, ".next", "standalone", "public"), { recursive: true });
+      fs.mkdirSync(path.join(NINEROUTER_DIR, ".next", "standalone", ".next", "static"), { recursive: true });
+      require("child_process").execSync(`xcopy /E /Y /Q "public\\*" ".next\\standalone\\public\\"`, { cwd: NINEROUTER_DIR, stdio: "ignore", windowsHide: true });
+      require("child_process").execSync(`xcopy /E /Y /Q ".next\\static\\*" ".next\\standalone\\.next\\static\\"`, { cwd: NINEROUTER_DIR, stdio: "ignore", windowsHide: true });
+      // Turbopack's standalone output omits some server chunks → ChunkLoadError 500
+      // at runtime. Overlay the full .next/server tree. Use fs.cpSync, not xcopy:
+      // xcopy/robocopy choke on turbopack's "[root-of-the-server]__*._.js" bracket names.
+      fs.cpSync(path.join(NINEROUTER_DIR, ".next", "server"), path.join(NINEROUTER_DIR, ".next", "standalone", ".next", "server"), { recursive: true, force: true });
+
+      // Start in background
+      console.log("Starting in background...");
+      const { spawn } = require("child_process");
+      const child = spawn("node", [path.join(NINEROUTER_DIR, ".next", "standalone", "server.js")], {
+        cwd: NINEROUTER_DIR,
+        env: { ...process.env, PORT: String(PORT), HOSTNAME: "127.0.0.1" },
+        stdio: "ignore",
+        detached: true,
+        windowsHide: true,
+      });
+      child.unref();
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Verify
+      try {
+        const h = await fetch(`http://127.0.0.1:${PORT}/api/health`, { signal: AbortSignal.timeout(5000) });
+        if (h.ok) console.log(`9Router UP on :${PORT}`);
+        else console.log("9Router responding but /health failed");
+      } catch { console.log("9Router may still be starting..."); }
+
+    } else if (cmdAction === "restart") {
+      console.log("Stopping...");
+      try {
+        require("child_process").execSync(`powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort ${PORT} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"`, { encoding: "utf8", windowsHide: true, timeout: 5000 });
+      } catch {}
+      await new Promise(r => setTimeout(r, 2000));
+      console.log("Stopped. Restart via '9router' command.");
+      console.log(`Run: node ${NINEROUTER_DIR}/cli/app/server.js  (PORT=${PORT})`);
+
+    } else if (cmdAction === "stop") {
+      console.log("Stopping 9Router...");
+      try {
+        require("child_process").execSync(`powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort ${PORT} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"`, { encoding: "utf8", windowsHide: true, timeout: 5000 });
+        console.log("Stopped.");
+      } catch { console.log("Already stopped or port free."); }
+
+    } else if (cmdAction === "status") {
+      try {
+        const h = await fetch(`http://127.0.0.1:${PORT}/api/health`, { signal: AbortSignal.timeout(3000) });
+        const j = await h.json();
+        console.log(`9Router RUNNING on :${PORT} — v${j.version || "?"} — ${j.uptime_seconds ? Math.round(j.uptime_seconds) + "s uptime" : ""}`);
+      } catch {
+        console.log("9Router STOPPED");
+      }
+
+    } else if (cmdAction === "svc-status") {
+      try {
+        const d = await svcStatus();
+        const svcs = d.services || [];
+        console.log(`${'NAME'.padEnd(25)} ${'STATUS'.padEnd(10)} PORT`);
+        console.log("-".repeat(43));
+        for (const s of svcs) {
+          console.log(`${s.id.padEnd(25)} ${s.status.padEnd(10)} :${s.port}`);
+        }
+        console.log(`\n${d.running || 0}/${d.total || 0} active`);
+      } catch { console.log("9Router not running. Start it first."); }
+
+    } else if (cmdAction === "svc-start") {
+      if (!cmdArg) { console.log("Usage: 9router --svc-start <id>"); process.exit(1); }
+      try {
+        const r = await svcApi("start", cmdArg);
+        console.log(r.ok ? `Started: ${r.message}` : `Failed: ${r.message || r.error}`);
+      } catch { console.log("9Router not reachable."); }
+
+    } else if (cmdAction === "svc-stop") {
+      if (!cmdArg) { console.log("Usage: 9router --svc-stop <id>"); process.exit(1); }
+      try {
+        const r = await svcApi("stop", cmdArg);
+        console.log(r.ok ? `Stopped: ${r.message}` : `Failed: ${r.message || r.error}`);
+      } catch { console.log("9Router not reachable."); }
+    }
+  }
+
+  main().catch(e => { console.error(e.message); process.exit(1); });
+  return;
 }
 
 // Auto-relaunch after update: detached process has no TTY → fallback to tray
@@ -368,9 +557,10 @@ function killProcessOnPort(port) {
             timeout: 5000
           }).trim();
           const lines = output.split('\n').filter(l => l.includes('LISTENING'));
-          if (lines.length > 0) {
-            pid = lines[0].trim().split(/\s+/).pop();
-            execSync(`taskkill /F /PID ${pid} 2>nul`, { stdio: 'ignore', shell: true, windowsHide: true, timeout: 3000 });
+          // Kill EVERY pid holding the port (0.0.0.0 + 127.0.0.1 + IPv6 can all list).
+          const pids = [...new Set(lines.map(l => l.trim().split(/\s+/).pop()).filter(Boolean))];
+          for (const p of pids) {
+            try { execSync(`taskkill /F /PID ${p} 2>nul`, { stdio: 'ignore', shell: true, windowsHide: true, timeout: 3000 }); } catch (_) {}
           }
         } catch (e) {
           // Port is free or error
@@ -382,17 +572,32 @@ function killProcessOnPort(port) {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'ignore']
           }).trim();
-          if (pidOutput) {
-            pid = pidOutput.split('\n')[0];
-            execSync(`kill -9 ${pid} 2>/dev/null`, { stdio: 'ignore', timeout: 3000 });
+          for (const p of pidOutput.split('\n').filter(Boolean)) {
+            try { execSync(`kill -9 ${p} 2>/dev/null`, { stdio: 'ignore', timeout: 3000 }); } catch (_) {}
           }
         } catch (e) {
           // Port is free or error
         }
       }
 
-      // Wait for port to be released
-      setTimeout(() => resolve(), 500);
+      // Poll until the port is actually released — Windows lingers after kill,
+      // and a fixed 500ms let a foreign listener cause EADDRINUSE on respawn.
+      const deadline = Date.now() + 6000;
+      const stillInUse = () => {
+        try {
+          if (platform === "win32") {
+            const o = execSync(`netstat -ano | findstr :${port}`, { encoding: 'utf8', shell: true, windowsHide: true, timeout: 5000 }).trim();
+            return o.split('\n').some(l => l.includes('LISTENING'));
+          }
+          const o = execSync(`lsof -ti:${port}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+          return !!o;
+        } catch (_) { return false; }
+      };
+      const wait = () => {
+        if (!stillInUse() || Date.now() >= deadline) return resolve();
+        setTimeout(wait, 300);
+      };
+      wait();
     } catch (err) {
       // Silent fail - continue anyway
       resolve();
@@ -553,6 +758,29 @@ async function showInterfaceMenu(latestVersion) {
   return "exit";
 }
 
+// Poll localhost until the server responds or timeout is reached.
+function waitForServer(port, timeoutMs = 30000, intervalMs = 300) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    function probe() {
+      const req = http.get(`http://127.0.0.1:${port}/`, { timeout: intervalMs }, (res) => {
+        res.resume();
+        resolve(true);
+      });
+      req.on("error", () => {
+        if (Date.now() >= deadline) return resolve(false);
+        setTimeout(probe, intervalMs);
+      });
+      req.on("timeout", () => {
+        req.destroy();
+        if (Date.now() >= deadline) return resolve(false);
+        setTimeout(probe, intervalMs);
+      });
+    }
+    probe();
+  });
+}
+
 const MAX_RESTARTS = 2;
 const RESTART_RESET_MS = 30000; // Reset counter if alive > 30s
 
@@ -677,17 +905,20 @@ function startServer(latestVersion) {
     console.log(`\n🚀 ${pkg.name} v${pkg.version}`);
     console.log(`Server: http://${displayHost}:${port}`);
 
-    setTimeout(() => {
+    waitForServer(port, 30000).then(() => {
       initTrayIcon();
       console.log("\n💡 Router is now running in system tray. Close this terminal if you want.");
       console.log("   Right-click tray icon to open dashboard or quit.\n");
-    }, 2000);
+    });
 
     return;
   }
 
-  // Wait for server to be ready, then show interface menu loop + tray
-  setTimeout(async () => {
+  // Wait for server to be ready (live HTTP probe), then show interface menu loop + tray
+  const spinner = createSpinner("Starting server...").start();
+  waitForServer(port, 30000).then(async (ready) => {
+    spinner.stop();
+    if (!ready) console.log("⚠️  Server did not respond within 30s. Continuing anyway...");
     // Start tray icon alongside TUI
     initTrayIcon();
 
@@ -772,7 +1003,7 @@ function startServer(latestVersion) {
       cleanup();
       process.exit(1);
     }
-  }, 3000);
+  });
 
   function attachServerEvents() {
     server.on("error", (err) => {

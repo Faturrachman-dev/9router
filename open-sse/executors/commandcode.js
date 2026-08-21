@@ -42,9 +42,126 @@ export class CommandCodeExecutor extends BaseExecutor {
   async execute(opts) {
     const result = await super.execute(opts);
     if (!result?.response?.ok || !result.response.body) return result;
-    result.response = wrapNdjsonAsOpenAISse(result.response, opts.model);
+
+    // CommandCode upstream returns HTTP 200 even when generation never starts,
+    // emitting an in-band {"type":"error"} NDJSON event instead of a real 5xx.
+    // Downstream that surfaced as fake assistant content ("[CommandCode error: ...]")
+    // with a normal stop reason, so clients treated a failed turn as a successful
+    // reply and never retried/failed over (0 tokens, silent failure). Peek the
+    // stream prefix: if an error arrives before any content, convert it to a real
+    // non-ok Response so chatCore's !ok path fires (→ failover, and the client sees
+    // a 5xx it can retry). If content already started, pass through untouched.
+    const scan = await scanNdjsonPrefix(result.response);
+    if (scan.earlyError) {
+      result.response = new Response(
+        JSON.stringify({ error: { message: scan.earlyError.message, type: "server_error" } }),
+        {
+          status: scan.earlyError.statusCode,
+          statusText: "Bad Gateway",
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+      return result;
+    }
+
+    result.response = wrapNdjsonAsOpenAISse(scan.response, opts.model);
     return result;
   }
+}
+
+// NDJSON event types that mean real generation has begun. Once one is seen we
+// must not convert the stream to an error — tokens are already legitimate.
+const CONTENT_EVENT_TYPES = new Set([
+  "text-delta", "reasoning-delta",
+  "tool-input-start", "tool-input-delta", "tool-input-end",
+  "tool-call",
+]);
+
+// Cap the peek so a well-behaved stream isn't buffered before first content
+// (content normally arrives in the first line or two; this is only defensive).
+const PEEK_MAX_BYTES = 64 * 1024;
+
+function peekEventType(line) {
+  const json = line.startsWith("data:") ? line.slice(5).trim() : line;
+  if (!json || json === "[DONE]") return null;
+  try { return JSON.parse(json)?.type || null; } catch { return null; }
+}
+
+function extractNdjsonError(line) {
+  const json = line.startsWith("data:") ? line.slice(5).trim() : line;
+  let message = "";
+  try {
+    const evt = JSON.parse(json);
+    const errVal = evt.error ?? evt.message ?? "unknown";
+    if (typeof errVal === "string") {
+      message = errVal;
+    } else if (errVal && typeof errVal === "object") {
+      // CommandCode nests {type, message}; message may already be mangled
+      // ("[object Object]") by their backend, so prefer type when so.
+      message = (errVal.message && errVal.message !== "[object Object]")
+        ? errVal.message
+        : (errVal.type || JSON.stringify(errVal));
+    }
+  } catch {
+    message = "unparseable error event";
+  }
+  return { statusCode: 502, message: `CommandCode upstream error: ${message || "unknown"}` };
+}
+
+/**
+ * Tee the upstream NDJSON body and scan its prefix. Returns either
+ * { earlyError: {statusCode, message} } when an error event precedes any content,
+ * or { response } — a Response wrapping the untouched (tee'd) stream for passthrough.
+ */
+async function scanNdjsonPrefix(response) {
+  const [scanBranch, passBranch] = response.body.tee();
+  const reader = scanBranch.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let bytesRead = 0;
+  let earlyError = null;
+  let contentStarted = false;
+
+  try {
+    while (bytesRead < PEEK_MAX_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytesRead += value?.byteLength || 0;
+      buffer += decoder.decode(value, { stream: true });
+
+      let decided = false;
+      let nl;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const rawLine = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!rawLine) continue;
+        const type = peekEventType(rawLine);
+        if (!type) continue;
+        if (type === "error") { earlyError = extractNdjsonError(rawLine); decided = true; break; }
+        if (CONTENT_EVENT_TYPES.has(type)) { contentStarted = true; decided = true; break; }
+        // start / start-step / *-start / metadata → keep scanning.
+      }
+      if (decided) break;
+    }
+  } catch {
+    // Peek failed — don't block a possibly-good stream; fall through to passthrough.
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+
+  if (earlyError && !contentStarted) {
+    passBranch.cancel().catch(() => {});
+    return { earlyError };
+  }
+
+  // Peeked bytes are still buffered in passBranch; hand it downstream unchanged.
+  return {
+    response: new Response(passBranch, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+  };
 }
 
 function wrapNdjsonAsOpenAISse(originalResponse, model) {

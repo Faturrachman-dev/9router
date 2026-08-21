@@ -1,4 +1,9 @@
+import fs from "node:fs";
 import { ensureDirs, DATA_FILE } from "./paths.js";
+
+// A brand-new DB (schema only) is ~176KB. Anything meaningfully larger holds
+// real data we must not let the in-memory sql.js driver overwrite on flush.
+const POPULATED_DB_BYTES = 300 * 1024;
 
 // Use global to survive Next.js dev hot-reload (module state resets on reload)
 if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false };
@@ -60,7 +65,29 @@ async function initAdapter() {
   let adapter = await tryBunSqlite();
   if (!adapter) adapter = await tryBetterSqlite();
   if (!adapter) adapter = await tryNodeSqlite();
-  if (!adapter) adapter = await trySqlJs();
+
+  // DATA-LOSS GUARD: sql.js is an in-memory driver — it loads data.sqlite into
+  // RAM and flushes the whole file back on write. If a native driver failed
+  // (almost always a Node ABI mismatch: better-sqlite3 built for a different
+  // Node major) AND a populated DB already exists, falling back to sql.js can
+  // overwrite that file with an empty/stale image. That is exactly how the DB
+  // got wiped once. Refuse to continue and fail LOUD instead. Fresh/tiny DBs
+  // (new installs, Bun-only envs) still fall back to sql.js fine.
+  if (!adapter) {
+    let existingBytes = 0;
+    try { existingBytes = fs.existsSync(DATA_FILE) ? fs.statSync(DATA_FILE).size : 0; } catch { /* ignore */ }
+    if (existingBytes > POPULATED_DB_BYTES) {
+      throw new Error(
+        `[DB] Refusing sql.js fallback to protect data: no native SQLite driver loaded ` +
+        `(better-sqlite3 / node:sqlite both unavailable) but a populated DB exists ` +
+        `(${DATA_FILE}, ${existingBytes} bytes). This is almost always a Node ABI mismatch — ` +
+        `run under the Node version better-sqlite3 was built for (v22 / hermes) or ` +
+        `'npm rebuild better-sqlite3'. Aborting so sql.js does not overwrite your data.`
+      );
+    }
+    adapter = await trySqlJs();
+  }
+
   if (!adapter) throw new Error("[DB] No SQLite driver available (bun/better/node/sql.js all failed)");
 
   if (!state.logged) {

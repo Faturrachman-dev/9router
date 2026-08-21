@@ -21,6 +21,8 @@ import {
   shouldResetPage,
   getPaginationPageValue,
   getProviderOptions,
+  resolveProviderIconSrc,
+  resolveProviderFallbackText,
   reconcileConnectionsPage,
   getQuotaCache,
   setQuotaCache,
@@ -691,13 +693,12 @@ export default function ProviderLimits() {
                   <span className="material-symbols-outlined text-[14px] text-text-muted">
                     apps
                   </span>
-                ) : (
-                  <ProviderIcon
-                    src={`/providers/${providerFilter}.png`}
+                ) : (                  <ProviderIcon
+                    src={resolveProviderIconSrc(providerFilter)}
                     alt={providerFilter}
                     size={18}
                     className="size-[18px] rounded object-contain"
-                    fallbackText={providerFilter.slice(0, 2).toUpperCase()}
+                    fallbackText={resolveProviderFallbackText(providerFilter)}
                   />
                 )}
                 <span className="truncate capitalize hidden lg:inline">
@@ -753,13 +754,12 @@ export default function ProviderLimits() {
                           setProviderMenuOpen(false);
                         }}
                         className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${providerFilter === provider ? "bg-primary/10 text-primary" : "text-text-primary hover:bg-black/5 dark:hover:bg-white/10"}`}
-                      >
-                        <ProviderIcon
-                          src={`/providers/${provider}.png`}
+                      >                        <ProviderIcon
+                          src={resolveProviderIconSrc(provider)}
                           alt={provider}
                           size={24}
                           className="size-6 rounded-md object-contain"
-                          fallbackText={provider.slice(0, 2).toUpperCase()}
+                          fallbackText={resolveProviderFallbackText(provider)}
                         />
                         <span className="font-medium capitalize">
                           {provider}
@@ -920,14 +920,13 @@ export default function ProviderLimits() {
               <div className="px-3 py-2 border-b border-black/10 dark:border-white/10">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-8 h-8 shrink-0 rounded-md flex items-center justify-center overflow-hidden">
-                      <ProviderIcon
-                        src={`/providers/${conn.provider}.png`}
+                    <div className="w-8 h-8 shrink-0 rounded-md flex items-center justify-center overflow-hidden">                      <ProviderIcon
+                        src={resolveProviderIconSrc(conn.provider)}
                         alt={conn.provider}
                         size={32}
                         className="object-contain"
                         fallbackText={
-                          conn.provider?.slice(0, 2).toUpperCase() || "PR"
+                          resolveProviderFallbackText(conn.provider) || "PR"
                         }
                       />
                     </div>

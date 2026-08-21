@@ -32,6 +32,9 @@ const nextConfig = {
     serverComponentsHmrCache: true,
   },
   webpack: (config, { isServer }) => {
+    if (isServer) {
+      config.externals = [...(config.externals || []), "better-sqlite3"];
+    }
     // Ignore fs/path modules in browser bundle
     if (!isServer) {
       config.resolve.fallback = {

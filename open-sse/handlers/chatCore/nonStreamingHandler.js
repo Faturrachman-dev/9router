@@ -229,9 +229,83 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     console.error("[RequestDetail] Failed to save:", err.message);
   });
 
+  let finalResponse = translatedResponse;
+  if (sourceFormat === FORMATS.CLAUDE) {
+    const choice = translatedResponse.choices?.[0];
+    const message = choice?.message;
+
+    // Inject popped prefill for claude-opus-4-6
+    if (body && model?.includes("claude-opus-4-6") && message) {
+      const messages = body.messages;
+      if (Array.isArray(messages) && messages.length > 0) {
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg && lastMsg.role === "assistant") {
+          let prefillText = "";
+          if (typeof lastMsg.content === "string") {
+            prefillText = lastMsg.content;
+          } else if (Array.isArray(lastMsg.content)) {
+            prefillText = lastMsg.content
+              .filter(c => c.type === "text")
+              .map(c => c.text)
+              .join("");
+          }
+          if (prefillText) {
+            let textContent = message.content || "";
+            if (textContent.startsWith(prefillText)) {
+              textContent = textContent.slice(prefillText.length);
+            }
+            message.content = prefillText + textContent;
+          }
+        }
+      }
+    }
+
+    const content = [];
+    
+    if (message?.content) {
+      content.push({
+        type: "text",
+        text: message.content
+      });
+    }
+    
+    if (Array.isArray(message?.tool_calls)) {
+      for (const tc of message.tool_calls) {
+        let args = {};
+        try {
+          args = JSON.parse(tc.function.arguments || "{}");
+        } catch {}
+        content.push({
+          type: "tool_use",
+          id: tc.id,
+          name: tc.function.name,
+          input: args
+        });
+      }
+    }
+    
+    let stopReason = "end_turn";
+    if (choice?.finish_reason === "length") stopReason = "max_tokens";
+    else if (choice?.finish_reason === "tool_calls") stopReason = "tool_use";
+    
+    finalResponse = {
+      id: translatedResponse.id?.replace("chatcmpl-", "msg_") || `msg_${Date.now()}`,
+      type: "message",
+      role: "assistant",
+      content: content.length > 0 ? content : [{ type: "text", text: "" }],
+      model: translatedResponse.model || model || "claude-model",
+      stop_reason: stopReason,
+      stop_sequence: null,
+      usage: {
+        input_tokens: translatedResponse.usage?.prompt_tokens || 0,
+        output_tokens: translatedResponse.usage?.completion_tokens || 0
+      }
+    };
+  }
+
   return {
     success: true,
-    response: new Response(JSON.stringify(translatedResponse), {
+    response: new Response(JSON.stringify(finalResponse), {
       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
     })
   };

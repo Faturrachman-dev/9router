@@ -3,9 +3,14 @@
   "version": "0.5.4",
   "description": "9Router web dashboard",
   "private": true,
+  "comment_volta": "Pins the Node version so bare `node` (in launchers/cron) can never drift to an ABI that fails better-sqlite3 and silently falls back to sql.js (which once wiped data.sqlite). Requires Volta installed to enforce on bare `node`; the .bat launchers already hardcode the hermes v22 path as a belt-and-suspenders.",
+  "volta": {
+    "node": "22.23.2"
+  },
   "scripts": {
     "dev": "next dev --webpack --port 20127",
-    "build": "next build --webpack",
+    "build": "next build --turbopack",
+    "build:webpack": "next build --webpack",
     "start": "next start",
     "dev:bun": "bun --bun next dev --webpack --port 20127",
     "build:bun": "bun --bun next build --webpack",
@@ -22,6 +27,7 @@
     "@next/third-parties": "^16.2.9",
     "@xyflow/react": "^12.10.1",
     "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.11.1",
     "confbox": "^0.2.4",
     "express": "^5.2.1",
     "fs": "^0.0.1-security",
@@ -45,9 +51,6 @@
     "undici": "^7.19.2",
     "uuid": "^13.0.0",
     "zustand": "^5.0.10"
-  },
-  "optionalDependencies": {
-    "better-sqlite3": "^12.6.2"
   },
   "comment_better_sqlite3": "kept in optionalDependencies so npm install doesn't fail on systems without build tools — sql.js is used as fallback at runtime",
   "devDependencies": {

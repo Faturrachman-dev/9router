@@ -179,6 +179,81 @@ export function getProviderOptions(dataProviderOptions) {
   return dataProviderOptions || [];
 }
 
+/**
+ * Provider icon resolution.
+ *
+ * The `provider` field on connections is a composite `<kind>-<identifier>` string
+ * (e.g. "openai-compatible-chat-clinepass", "openai-compatible-chat-<uuid>").
+ * Using it directly as a PNG filename produces 404s for every connection.
+ * These helpers strip the kind prefix + UUID suffix, apply a known-logo alias
+ * map, and fall back to the kind's generic logo for UUID-only identifiers.
+ */
+const PROVIDER_KIND_PREFIXES = [
+  { prefix: "openai-compatible-chat-", generic: "openai" },
+  { prefix: "openai-completions-", generic: "openai" },
+  { prefix: "openai-responses-", generic: "openai" },
+  { prefix: "anthropic-", generic: "anthropic" },
+  { prefix: "gemini-", generic: "gemini" },
+  { prefix: "bedrock-", generic: "aws" },
+];
+
+// Map identifier (after stripping kind prefix) to a logo that exists in /providers/.
+const PROVIDER_ICON_ALIASES = {
+  clinepass: "cline",
+  cline: "cline",
+  agentrouter: "openai",
+  openai: "openai",
+  anthropic: "anthropic",
+  claude: "claude",
+  gemini: "gemini",
+  deepseek: "deepseek",
+  codex: "codex",
+  minimax: "openai",
+  glm: "openai",
+};
+
+const STANDALONE_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function stripProviderComposite(rawProvider) {
+  const name = String(rawProvider || "").toLowerCase();
+  let generic = "openai";
+  let base = name;
+  const sorted = [...PROVIDER_KIND_PREFIXES].sort(
+    (a, b) => b.prefix.length - a.prefix.length
+  );
+  for (const { prefix, generic: g } of sorted) {
+    if (base.startsWith(prefix)) {
+      base = base.slice(prefix.length);
+      generic = g;
+      break;
+    }
+  }
+  return { base, generic };
+}
+
+/** Resolve a /providers/<name>.png URL for a (possibly composite) provider string. */
+export function resolveProviderIconSrc(provider) {
+  if (!provider) return "";
+  const { base, generic } = stripProviderComposite(provider);
+  if (!base || STANDALONE_UUID_RE.test(base)) {
+    return `/providers/${generic}.png`;
+  }
+  const aliased = PROVIDER_ICON_ALIASES[base];
+  return `/providers/${aliased || base}.png`;
+}
+
+/** Resolve a short 1-2 char fallback label from a (possibly composite) provider string. */
+export function resolveProviderFallbackText(provider) {
+  if (!provider) return "?";
+  const { base, generic } = stripProviderComposite(provider);
+  const label =
+    !base || STANDALONE_UUID_RE.test(base)
+      ? generic
+      : PROVIDER_ICON_ALIASES[base] || base;
+  return label.slice(0, 2).toUpperCase();
+}
+
 export async function reconcileConnectionsPage(fetchConnections, targetPage) {
   return await fetchConnections(targetPage);
 }

@@ -1,10 +1,16 @@
 import { getAdapter } from "../driver.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 
 const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
 const DEFAULT_MAX_JSON_SIZE = 5 * 1024;
+const FULL_BODY_MAX_SIZE = 2 * 1024 * 1024; // 2MB disk cache for "Show Full" / Download
+const FULL_BODY_MAX_FILES = 20;
+const FULL_BODY_DIR = path.join(os.tmpdir(), "9router-full-bodies");
 const CONFIG_CACHE_TTL_MS = 5000;
 
 let cachedConfig = null;
@@ -24,7 +30,7 @@ async function getObservabilityConfig() {
       maxRecords: settings.observabilityMaxRecords || parseInt(process.env.OBSERVABILITY_MAX_RECORDS || String(DEFAULT_MAX_RECORDS), 10),
       batchSize: settings.observabilityBatchSize || parseInt(process.env.OBSERVABILITY_BATCH_SIZE || String(DEFAULT_BATCH_SIZE), 10),
       flushIntervalMs: settings.observabilityFlushIntervalMs || parseInt(process.env.OBSERVABILITY_FLUSH_INTERVAL_MS || String(DEFAULT_FLUSH_INTERVAL_MS), 10),
-      maxJsonSize: (settings.observabilityMaxJsonSize || parseInt(process.env.OBSERVABILITY_MAX_JSON_SIZE || "5", 10)) * 1024,
+      maxJsonSize: (settings.observabilityMaxJsonSize || parseInt(process.env.OBSERVABILITY_MAX_JSON_SIZE || "50", 10)) * 1024,
     };
   } catch {
     cachedConfig = {
@@ -63,27 +69,140 @@ function generateDetailId(model) {
 function truncateField(obj, maxSize) {
   const str = JSON.stringify(obj || {});
   if (str.length > maxSize) {
-    return { _truncated: true, _originalSize: str.length, _preview: str.substring(0, 200) };
+    return { _truncated: true, _originalSize: str.length, _preview: str.substring(0, 2000) };
   }
   return obj || {};
 }
+
+// Recursively search an object for a gateway/upstream cost field.
+// ClinePass and similar upstreams return the real cost in provider_metadata.gateway.cost,
+// which is more accurate than pricing-table estimation (and works even when usage extraction fails).
+function extractGatewayCost(obj, depth = 0) {
+  if (!obj || typeof obj !== "object" || depth > 6) return 0;
+  const gw = obj.gateway || obj.provider_metadata?.gateway || obj.providerMetadata?.gateway;
+  if (gw && typeof gw === "object") {
+    for (const k of ["cost", "gatewayCost", "inferenceCost"]) {
+      const v = gw[k];
+      if (typeof v === "number" && v > 0) return v;
+      if (typeof v === "string" && parseFloat(v) > 0) return parseFloat(v);
+    }
+  }
+  for (const v of Object.values(obj)) {
+    const c = extractGatewayCost(v, depth + 1);
+    if (c > 0) return c;
+  }
+  return 0;
+}
+
+// Full-body disk cache (up to 50KB each, ring-buffer of 20)
+function getFullBodyPath(id) {
+  try { fs.mkdirSync(FULL_BODY_DIR, { recursive: true }); } catch {}
+  return path.join(FULL_BODY_DIR, id.replace(/[^a-zA-Z0-9._-]/g, "_") + ".json");
+}
+
+function saveFullBody(id, obj) {
+  try {
+    const str = JSON.stringify(obj || {});
+    if (str.length > FULL_BODY_MAX_SIZE) return; // too big, skip
+    fs.writeFileSync(getFullBodyPath(id), str, "utf-8");
+    // Ring buffer cleanup
+    const files = fs.readdirSync(FULL_BODY_DIR)
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(FULL_BODY_DIR, f)).mtimeMs }))
+      .sort((a, b) => a.mtime - b.mtime);
+    while (files.length > FULL_BODY_MAX_FILES) {
+      const oldest = files.shift();
+      try { fs.unlinkSync(path.join(FULL_BODY_DIR, oldest.name)); } catch {}
+    }
+  } catch {}
+}
+
+function loadFullBody(id) {
+  try {
+    const p = getFullBodyPath(id);
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch { return null; }
+}
+
+// Suffix → requestDetail field name mapping (for SQLite fallback when disk cache misses)
+const BODY_SUFFIX_FIELD = {
+  "": "request",
+  "_preq": "providerRequest",
+  "_pres": "providerResponse",
+  "_resp": "response",
+};
+
+// Fallback for old requests (pre-disk-cache): return the SQLite-stored field.
+// If the field was truncated, returns { _truncated, _originalSize, _preview } object.
+async function loadBodyFromSqlite(id) {
+  let suffix = "";
+  let baseId = id;
+  for (const s of ["_preq", "_pres", "_resp"]) {
+    if (id.endsWith(s)) { suffix = s; baseId = id.slice(0, -s.length); break; }
+  }
+  const field = BODY_SUFFIX_FIELD[suffix];
+  if (!field) return null;
+  try {
+    const db = await getAdapter();
+    const row = db.get(`SELECT data FROM requestDetails WHERE id = ?`, [baseId]);
+    if (!row) return null;
+    const parsed = parseJson(row.data, {});
+    const val = parsed[field];
+    if (val == null) return null;
+    return val;
+  } catch { return null; }
+}
+
+// Try disk cache first; fall back to SQLite-stored field for old requests.
+async function loadFullBodyWithFallback(id) {
+  const disk = loadFullBody(id);
+  if (disk != null) return { data: disk, source: "disk" };
+  const sqlite = await loadBodyFromSqlite(id);
+  if (sqlite != null) return { data: sqlite, source: "sqlite-preview" };
+  return null;
+}
+
 
 async function flushToDatabase() {
   if (isFlushing) return;
   if (writeBuffer.length === 0) return;
   isFlushing = true;
-  try {
-    // Drain entire buffer (loop in case more pushed during await)
-    while (writeBuffer.length > 0) {
-      const items = writeBuffer.splice(0, writeBuffer.length);
-      const db = await getAdapter();
-      const config = await getObservabilityConfig();
+  try {      // Drain entire buffer (loop in case more pushed during await)
+      while (writeBuffer.length > 0) {
+        const items = writeBuffer.splice(0, writeBuffer.length);
+        const db = await getAdapter();
+        const config = await getObservabilityConfig();
 
-      db.transaction(() => {
+        // Precompute cost per item (async; outside the sync transaction)
+        let calcCost;
+        try {
+          const mod = await import("./usageRepo.js");
+          calcCost = mod.calculateCost;
+        } catch { calcCost = null; }
+        for (const item of items) {
+          try {
+            // Prefer real upstream gateway cost (most accurate); fall back to pricing-table calc
+            const gwCost = extractGatewayCost(item.response) || extractGatewayCost(item.providerResponse);
+            item.cost = gwCost > 0
+              ? gwCost
+              : calcCost
+                ? await calcCost(item.provider, item.model, item.tokens)
+                : 0;
+          } catch { item.cost = 0; }
+        }
+
+        db.transaction(() => {
         for (const item of items) {
           if (!item.id) item.id = generateDetailId(item.model);
           if (!item.timestamp) item.timestamp = new Date().toISOString();
           if (item.request?.headers) item.request.headers = sanitizeHeaders(item.request.headers);
+
+          // Save full bodies to disk cache (up to 50KB) before truncation
+          const fullId = item.id || generateDetailId(item.model);
+          saveFullBody(fullId, item.request);
+          saveFullBody(fullId + "_preq", item.providerRequest);
+          saveFullBody(fullId + "_pres", item.providerResponse);
+          saveFullBody(fullId + "_resp", item.response);
 
           const record = {
             id: item.id,
@@ -94,6 +213,7 @@ async function flushToDatabase() {
             status: item.status || null,
             latency: item.latency || {},
             tokens: item.tokens || {},
+            cost: item.cost || 0,
             request: truncateField(item.request, config.maxJsonSize),
             providerRequest: truncateField(item.providerRequest, config.maxJsonSize),
             providerResponse: truncateField(item.providerResponse, config.maxJsonSize),
@@ -198,3 +318,5 @@ function ensureShutdownHandler() {
 }
 
 ensureShutdownHandler();
+
+export { loadFullBody, loadFullBodyWithFallback };

@@ -90,6 +90,14 @@ export class DefaultExecutor extends BaseExecutor {
         delete transformed.client_metadata;
       }
       stripUnsupportedParams(this.provider, model, transformed);
+
+      // Prefill workaround for claude-opus-4-6
+      if (model?.includes("claude-opus-4-6") && Array.isArray(transformed.messages) && transformed.messages.length > 0) {
+        const lastMsg = transformed.messages[transformed.messages.length - 1];
+        if (lastMsg && lastMsg.role === "assistant" && !lastMsg.tool_calls) {
+          transformed.messages.pop(); // Pop the prefill message
+        }
+      }
     }
 
     return injectReasoningContent({ provider: this.provider, model, body: transformed });
@@ -193,6 +201,11 @@ export class DefaultExecutor extends BaseExecutor {
           }
         }
       }
+    }
+
+    if (this.provider?.includes?.("agentrouter")) {
+      headers["Originator"] = "codex_cli_rs";
+      headers["User-Agent"] = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464";
     }
 
     if (stream) headers["Accept"] = "text/event-stream";

@@ -109,6 +109,9 @@ export const MODEL_PRICING = {
   // === OpenRouter fallback ===
   "auto":                         { input: 2.00,  output: 8.00,  cached: 1.00,  reasoning: 12.00,  cache_creation: 2.00  },
 
+  // === CommandCode (Muse) ===
+  "muse-spark-1.2-contributor":   { input: 0.10,  output: 0.20,  cached: 0.002, reasoning: 0.20,   cache_creation: 0.10  },
+
   // === Misc ===
   "oswe-vscode-prime":            { input: 1.00,  output: 4.00,  cached: 0.50,  reasoning: 6.00,   cache_creation: 1.00  },
   "gpt-oss-120b-medium":          { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  },
@@ -204,6 +207,9 @@ export const PATTERN_PRICING = [
   // --- Grok ---
   { pattern: "grok-code-*",     pricing: { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  } },
   { pattern: "grok-*",          pricing: { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  } },
+
+  // --- CommandCode (Muse) ---
+  { pattern: "*muse-spark*",    pricing: { input: 0.10,  output: 0.20,  cached: 0.002, reasoning: 0.20,   cache_creation: 0.10  } },
 ];
 
 /**

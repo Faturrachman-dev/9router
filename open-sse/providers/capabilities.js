@@ -206,6 +206,8 @@ export const PATTERN_CAPABILITIES = [
   { pattern: "*perplexity*",    caps: { search: true, contextWindow: 128000 } },
 
   // ── Others ───────────────────────────────────────────────────────
+  // Meta Muse (Spark) — multimodal (vision) + reasoning
+  { pattern: "*muse*",          caps: { vision: true, reasoning: true, contextWindow: 200000, maxOutput: 8000 } },
   { pattern: "*hunyuan*",       caps: { reasoning: true, thinkingFormat: "hunyuan", contextWindow: 262144, maxOutput: 262144 } },
   { pattern: "hy3*",            caps: { reasoning: true, thinkingFormat: "hunyuan", contextWindow: 262144, maxOutput: 262144 } },
   { pattern: "*step-*",         caps: { reasoning: true, thinkingFormat: "step", contextWindow: 128000 } },

@@ -5,7 +5,7 @@ import Card from "@/shared/components/Card";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import Badge from "@/shared/components/Badge";
 import QuotaProgressBar from "./QuotaProgressBar";
-import { calculatePercentage } from "./utils";
+import { calculatePercentage, resolveProviderIconSrc, resolveProviderFallbackText } from "./utils";
 
 const planVariants = {
   free: "default",
@@ -62,13 +62,12 @@ export default function ProviderLimitCard({
           <div
             className="size-10 rounded-lg flex items-center justify-center p-1.5"
             style={{ backgroundColor: `${providerColor}15` }}
-          >
-            <ProviderIcon
-              src={`/providers/${provider}.png`}
+          >            <ProviderIcon
+              src={resolveProviderIconSrc(provider)}
               alt={provider || "Provider"}
               size={40}
               className="object-contain rounded-lg"
-              fallbackText={provider?.slice(0, 2).toUpperCase() || "PR"}
+              fallbackText={resolveProviderFallbackText(provider) || "PR"}
               fallbackColor={providerColor}
             />
           </div>

@@ -15,6 +15,7 @@ import {
 } from "@/lib/tunnel";
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
 import { startClaudeAutoPing } from "@/shared/services/claudeAutoPing";
+import { autoStartServices } from "@/lib/serviceManager";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 
 // Inject correct paths and DB hooks into manager.js (CJS) from ESM context
@@ -43,6 +44,7 @@ const g = global.__appSingleton ??= {
   mitmStartInProgress: false,
   tunnelAutoResumed: false,
   tailscaleAutoResumed: false,
+  proxiesAutoStarted: false,
 };
 
 export async function initializeApp() {
@@ -90,6 +92,15 @@ export async function initializeApp() {
     startNetworkMonitor();
     autoStartMitm();
     startClaudeAutoPing();
+
+    // Auto-start local proxies flagged autostart:true (e.g. morph-proxy on :8790,
+    // which the Hermes auxiliary models depend on). Once per process.
+    if (!g.proxiesAutoStarted) {
+      g.proxiesAutoStarted = true;
+      autoStartServices()
+        .then((r) => { if (r?.length) console.log("[InitApp] Autostart proxies:", r.map(([id, ok]) => `${id}=${ok ? "ok" : "fail"}`).join(", ")); })
+        .catch((e) => console.log("[InitApp] Proxy autostart failed:", e.message));
+    }
   } catch (error) {
     console.error("[InitApp] Error:", error);
   }

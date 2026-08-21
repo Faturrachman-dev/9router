@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { UsageStats, RequestLogger, CardSkeleton, SegmentedControl } from "@/shared/components";
 import RequestDetailsTab from "./components/RequestDetailsTab";
@@ -27,16 +27,24 @@ function UsageContent() {
 
   const [period, setPeriod] = useState("today");
 
-  const tabFromUrl = searchParams.get("tab");
-  const activeTab = tabFromUrl && ["overview", "logs", "details"].includes(tabFromUrl)
-    ? tabFromUrl
-    : "overview";
+  // Tab is held in local state (updates instantly on click) and kept in sync with
+  // the URL. Deriving activeTab directly from useSearchParams() breaks tab switching
+  // on a hard-loaded (statically-prerendered) page: router.push updates the URL bar
+  // but useSearchParams() doesn't always re-fire, so the tab stays pinned to the
+  // original ?tab= value. Local state + effect-sync avoids that dependency.
+  const [activeTab, setActiveTab] = useState("overview");
+
+  useEffect(() => {
+    const t = searchParams.get("tab");
+    setActiveTab(t && ["overview", "logs", "details"].includes(t) ? t : "overview");
+  }, [searchParams]);
 
   const handleTabChange = (value) => {
     if (value === activeTab) return;
+    setActiveTab(value);
     const params = new URLSearchParams(searchParams);
     params.set("tab", value);
-    router.push(`/dashboard/usage?${params.toString()}`, { scroll: false });
+    router.replace(`/dashboard/usage?${params.toString()}`, { scroll: false });
   };
 
   return (

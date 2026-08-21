@@ -154,11 +154,53 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   // explicit `name` field and cannot be represented as Chat Completions function declarations.
   // Filter them out to avoid sending nameless functionDeclarations to downstream providers
   // such as Gemini, which strictly validates function names.
+  // Track whether apply_patch was present — if so, inject fallback instruction
+  let hasApplyPatch = false;
+
   if (body.tools && Array.isArray(body.tools)) {
     result.tools = body.tools
       .map(tool => {
         // Already in Chat Completions format: { type: "function", function: { name, ... } }
         if (tool.function) return tool;
+        // apply_patch is a "custom" type tool with a Lark grammar format field.
+        // Grammar-constrained generation only works on OpenAI's native Codex endpoint.
+        // When routing through Chat Completions (e.g. AgentRouter), strip it and fall
+        // back to shell_command — injected as a system instruction below.
+        if (tool.type === "custom") {
+          if (tool.name === "apply_patch") hasApplyPatch = true;
+          return null; // Drop custom tools — not supported in Chat Completions
+        }
+        // Map built-in tool_search tool
+        if (tool.type === "tool_search") {
+          return {
+            type: OPENAI_BLOCK.FUNCTION,
+            function: {
+              name: "tool_search",
+              description: String(tool.description || ""),
+              parameters: normalizeToolParameters(tool.parameters)
+            }
+          };
+        }
+        // Map built-in web_search tool
+        if (tool.type === "web_search") {
+          return {
+            type: OPENAI_BLOCK.FUNCTION,
+            function: {
+              name: "web_search",
+              description: "Search the web for information.",
+              parameters: {
+                type: "object",
+                properties: {
+                  query: {
+                    type: "string",
+                    description: "The search query to look up on the web."
+                  }
+                },
+                required: ["query"]
+              }
+            }
+          };
+        }
         // Responses API function tool: { type: "function", name, description, parameters }
         // Only convert when a non-empty name is present; skip hosted tools without one.
         const name = tool.name;
@@ -175,6 +217,26 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
       })
       .filter(Boolean);
   }
+
+  // apply_patch was stripped: inject fallback instruction into system message so the
+  // model uses shell_command (PowerShell) for file writes instead.
+  if (hasApplyPatch && Array.isArray(result.messages) && result.messages.length > 0) {
+    const APPLY_PATCH_FALLBACK = "\n\nIMPORTANT: The apply_patch tool is not available in this environment. " +
+      "To create or edit files, use the shell_command tool with PowerShell. Rules:\n" +
+      "- Create directories: New-Item -ItemType Directory -Force -Path 'dir/path' (NEVER use -LiteralPath with New-Item)\n" +
+      "- Write a file: Set-Content -Path 'file.txt' -Value 'content' -Encoding UTF8\n" +
+      "- Append to a file: Add-Content -Path 'file.txt' -Value 'more content' -Encoding UTF8\n" +
+      "- Write multi-line file: use a here-string assigned to a variable, then Set-Content -Path 'file.txt' -Value $content -Encoding UTF8\n" +
+      "- Do NOT use -LiteralPath with New-Item; it is unsupported. Use -Path instead.";
+    const sysMsg = result.messages.find(m => m.role === ROLE.SYSTEM);
+    if (sysMsg) {
+      if (typeof sysMsg.content === "string") sysMsg.content += APPLY_PATCH_FALLBACK;
+      else if (Array.isArray(sysMsg.content)) sysMsg.content.push({ type: "text", text: APPLY_PATCH_FALLBACK });
+    } else {
+      result.messages.unshift({ role: ROLE.SYSTEM, content: APPLY_PATCH_FALLBACK.trim() });
+    }
+  }
+
 
   // Cleanup Responses API specific fields
   // Map Responses-only max_output_tokens to Chat max_tokens (avoid leaking unknown field upstream)
@@ -308,6 +370,7 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
           strict: tool.function.strict
         };
       }
+      // Preserve "custom" type tools (e.g. apply_patch) and other non-function types as-is.
       return tool;
     });
   }
