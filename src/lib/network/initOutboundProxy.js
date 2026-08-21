@@ -17,9 +17,19 @@ export async function ensureOutboundProxyInitialized() {
   return initialized;
 }
 
+// Skip during Next.js build/prerender — page-data collection spawns 15 workers
+// that each import this module; firing getSettings() there hits SQLite at build
+// (ABI mismatch under the build's Node) and spams [ServerInit] errors. Mirror the
+// guard in shared/services/bootstrap.js.
+const isBuildPhase = process.env.NEXT_PHASE === "phase-production-build"
+  || process.env.NEXT_PHASE === "phase-export"
+  || process.env.NEXT_PHASE === "phase-static";
+
 // Defer init so HTTP server accepts connections first
-setImmediate(() => {
-  ensureOutboundProxyInitialized().catch(console.log);
-});
+if (!isBuildPhase) {
+  setImmediate(() => {
+    ensureOutboundProxyInitialized().catch(console.log);
+  });
+}
 
 export default ensureOutboundProxyInitialized;

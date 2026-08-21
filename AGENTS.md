@@ -41,6 +41,7 @@ Merging upstream stacks regressions. Recurring recipe:
 - master-control (`C:\Users\hafiz\master-control\services.json`, dash :7788) caches cfg in memory:
   after editing, `POST :7788/api/config/reload` THEN restart the service.
 - Full 5-regression writeup + verified fixes → Engram #220.
+- Rebuild-speed debug + nft/build-phase-guard fixes → `docs/TROUBLESHOOTING.md` + Engram #222.
 
 ## What persists vs. what's build-specific
 - **SQLite DB** (`%APPDATA%\9router\db\data.sqlite`) is shared across both builds —

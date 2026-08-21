@@ -24,8 +24,10 @@ const SOCKET_FLAG = IS_WINDOWS ? [] : ["--socket", TAILSCALE_SOCKET];
 const SYSTEM_TAILSCALE_SOCKET = IS_WINDOWS ? null : "/var/run/tailscale/tailscaled.sock";
 const SYSTEM_SOCKET_FLAG = SYSTEM_TAILSCALE_SOCKET ? ["--socket", SYSTEM_TAILSCALE_SOCKET] : [];
 
-// Well-known Windows install path
-const WINDOWS_TAILSCALE_BIN = "C:\\Program Files\\Tailscale\\tailscale.exe";
+// Well-known Windows install path. Built via .join() so @vercel/nft's asset
+// tracer can't fold the literal and bundle C:/Program Files/Tailscale into the
+// standalone output (→ ENOENT mkdir on build).
+const WINDOWS_TAILSCALE_BIN = ["C:", "Program Files", "Tailscale", "tailscale.exe"].join("\\");
 
 // Common Unix install paths to probe synchronously (system tailscale)
 const UNIX_TAILSCALE_CANDIDATES = [

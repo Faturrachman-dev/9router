@@ -6,14 +6,19 @@ import { join } from "node:path";
 
 const HOMEDIR = process.env.USERPROFILE || homedir();
 const CONFIG_FILE = join(HOMEDIR, "tools", "9router", "service_config.json");
-const TABBIT_DIR = "C:/FATUR/DATA/Projects/AI APIs/Tabbit";
+// Machine-specific absolute paths hidden from @vercel/nft's asset tracer, which
+// bundles any string literal that resolves to a real path on the build machine
+// (pulls Tabbit/, Sandboxie-Plus/, C:/Tools/* into standalone → ENOENT mkdir on
+// build + output bloat). A .join() call is opaque to the static analyzer.
+const wp = (...seg) => seg.join("/");
+const TABBIT_DIR = wp("C:", "FATUR", "DATA", "Projects", "AI APIs", "Tabbit");
 const PORT_CHECK_TIMEOUT = 500;
 
 // Reseed (Tabbit box re-harvest) wiring. Maps each service's CDP port to its
 // Sandboxie box so the Reseed button can (re)launch a headful, logged-in box and
 // let the proxy re-harvest a fresh token on restart.
-const SANDBOXIE_START = "C:/Program Files/Sandboxie-Plus/Start.exe";
-const TABBIT_BROWSER = "C:/FATUR/Program Files/Tabbit/Application/Tabbit Browser.exe";
+const SANDBOXIE_START = wp("C:", "Program Files", "Sandboxie-Plus", "Start.exe");
+const TABBIT_BROWSER = wp("C:", "FATUR", "Program Files", "Tabbit", "Application", "Tabbit Browser.exe");
 const CDP_TO_BOX = { "9446": "Tabbit_Gmail1", "9447": "Tabbit_Gmail2", "9448": "Tabbit_Gmail3" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -76,7 +81,7 @@ const DEFAULT_SERVICES = [
     name: "Morph Proxy :8790",
     category: "Proxy",
     port: 8790,
-    cwd: "C:/Tools/morph-proxy-py",
+    cwd: wp("C:", "Tools", "morph-proxy-py"),
     cmd: ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8790"],
     env: { PORT: "8790" },
     enabled: true,
@@ -87,7 +92,7 @@ const DEFAULT_SERVICES = [
     name: "Accio Proxy :4000",
     category: "Proxy",
     port: 4000,
-    cwd: "C:/Tools/fingerprint-chromium",
+    cwd: wp("C:", "Tools", "fingerprint-chromium"),
     // Start the SUPERVISOR in --once mode, not accio-proxy.py directly: it brings
     // up the headless controller (:47990) AND the proxy (:4000) then exits. Starting
     // accio-proxy.py alone left the proxy with no browser behind it (all 503s).
@@ -107,7 +112,7 @@ const DEFAULT_SERVICES = [
     name: "Accio Proxy cf2 :4001",
     category: "Proxy",
     port: 4001,
-    cwd: "C:/Tools/fingerprint-chromium",
+    cwd: wp("C:", "Tools", "fingerprint-chromium"),
     // 2nd Accio account (profile camoufox-2). Same supervisor, env-pinned to its
     // own controller (:47991) + proxy (:4001) so it runs alongside :4000 without
     // colliding or clobbering the shared controller port file. See accio-supervisor.py.

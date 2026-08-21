@@ -54,6 +54,42 @@ function getProviderName(providerId, cache) {
 function CollapsibleSection({ title, children, defaultOpen = false, icon = null }) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   
+
+  const TruncatedSection = ({ title, data, icon, defaultOpen, detailId, suffix, type }) => {
+    const key = suffix || detailId;
+    const isTruncated = data?._truncated === true;
+    const originalSize = data?._originalSize;
+    const source = bodySources[key];
+    const fullData = fullBodies[key];
+    const isLoading = loadingFull[key];
+    const isPreview = source === "sqlite-preview";
+    const displayData = fullData || data;
+    return (
+      <CollapsibleSection title={title} defaultOpen={defaultOpen} icon={icon}>
+        <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
+          {type === 'text' && typeof displayData === 'string' ? displayData : JSON.stringify(displayData, null, 2)}
+        </pre>
+        {isTruncated && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-text-muted">Truncated from {(originalSize / 1024).toFixed(1)}KB</span>
+            {!fullData && (
+              <button onClick={() => fetchFullBody(detailId, suffix)} disabled={isLoading} className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 disabled:opacity-50">
+                {isLoading ? "Loading..." : "Show Full"}
+              </button>
+            )}
+            {fullData && isPreview && <span className="text-xs text-amber-600 dark:text-amber-400">Full body not cached (pre-feature request) — showing SQLite preview</span>}
+            <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
+          </div>
+        )}
+        {!isTruncated && data && (
+          <div className="mt-2">
+            <button onClick={() => downloadFullBody(detailId, suffix)} className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10">Download JSON</button>
+          </div>
+        )}
+      </CollapsibleSection>
+    );
+  };
+
   return (
     <div className="border border-black/5 dark:border-white/5 rounded-lg overflow-hidden">
       <button 
@@ -117,6 +153,9 @@ export default function RequestDetailsTab() {
     startDate: "",
     endDate: ""
   });
+  const [fullBodies, setFullBodies] = useState({});
+  const [loadingFull, setLoadingFull] = useState({});
+  const [bodySources, setBodySources] = useState({});
 
   const fetchProviders = useCallback(async () => {
     try {
@@ -178,6 +217,41 @@ export default function RequestDetailsTab() {
   const handleClearFilters = () => {
     setFilters({ provider: "", startDate: "", endDate: "" });
   };
+  const fetchFullBody = async (detailId, suffix) => {
+    const key = suffix || detailId;
+    if (fullBodies[key] || loadingFull[key]) return;
+    setLoadingFull(prev => ({ ...prev, [key]: true }));
+    try {
+      const res = await fetch(`/api/v1/admin/request-body/${encodeURIComponent(key)}`);
+      if (res.ok) {
+        const body = await res.json();
+        setFullBodies(prev => ({ ...prev, [key]: body.data ?? body }));
+        if (body.source) setBodySources(prev => ({ ...prev, [key]: body.source }));
+      }
+    } catch {} finally {
+      setLoadingFull(prev => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const downloadFullBody = async (detailId, suffix) => {
+    const key = suffix || detailId;
+    try {
+      const res = await fetch(`/api/v1/admin/request-body/${encodeURIComponent(key)}`);
+      if (!res.ok) return;
+      const body = await res.json();
+      const payload = body.data ?? body;
+      const blob = new Blob([typeof payload === "string" ? payload : JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${key}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {}
+  };
+
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
@@ -259,6 +333,7 @@ export default function RequestDetailsTab() {
                 <th className="text-right p-4 text-sm font-semibold text-text-main">Cached</th>
                 <th className="text-right p-4 text-sm font-semibold text-text-main">Cache Creation</th>
                 <th className="text-right p-4 text-sm font-semibold text-text-main">Output Tokens</th>
+                <th className="text-right p-4 text-sm font-semibold text-text-main">Cost</th>
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Latency</th>
                 <th className="text-center p-4 text-sm font-semibold text-text-main">Action</th>
               </tr>
@@ -314,6 +389,7 @@ export default function RequestDetailsTab() {
                         <div>Total: <span className="font-mono">{detail.latency?.total || 0}ms</span></div>
                       </div>
                     </td>
+                    <td className="p-4 text-sm text-text-main text-right font-mono">${(typeof detail.cost === "number" ? detail.cost : 0).toFixed(6)}</td>
                     <td className="p-4 text-center">
                       <Button
                         variant="outline"
@@ -411,6 +487,10 @@ export default function RequestDetailsTab() {
                   {selectedDetail.tokens?.completion_tokens?.toLocaleString() || 0}
                 </span>
               </div>
+              <div>
+                <span className="text-text-muted">Cost:</span>{" "}
+                <span className="text-text-main font-mono">${(typeof selectedDetail.cost === "number" ? selectedDetail.cost : 0).toFixed(6)}</span>
+              </div>
             </div>
 
             {selectedDetail.pxpipe && (
@@ -463,22 +543,11 @@ export default function RequestDetailsTab() {
               </CollapsibleSection>
 
               {selectedDetail.providerRequest && (
-                <CollapsibleSection title="2. Provider Request (Translated)" icon="translate">
-                  <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                    {JSON.stringify(selectedDetail.providerRequest, null, 2)}
-                  </pre>
-                </CollapsibleSection>
+                <TruncatedSection title="2. Provider Request (Translated)" icon="translate" data={selectedDetail.providerRequest} detailId={selectedDetail.id} suffix={`${selectedDetail.id}:providerRequest`} />
               )}
 
               {selectedDetail.providerResponse && (
-                <CollapsibleSection title="3. Provider Response (Raw)" icon="data_object">
-                  <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                    {typeof selectedDetail.providerResponse === 'object'
-                      ? JSON.stringify(selectedDetail.providerResponse, null, 2)
-                      : selectedDetail.providerResponse
-                    }
-                  </pre>
-                </CollapsibleSection>
+                <TruncatedSection title="3. Provider Response (Raw)" icon="data_object" data={selectedDetail.providerResponse} detailId={selectedDetail.id} suffix={`${selectedDetail.id}:providerResponse`} />
               )}
               
               <CollapsibleSection title="4. Client Response (Final)" defaultOpen={true} icon="output">

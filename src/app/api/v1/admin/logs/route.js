@@ -9,9 +9,12 @@ const CORS = {
   "Access-Control-Allow-Headers": "*",
 };
 
+// wp() hides these absolute log paths from @vercel/nft's asset tracer (it bundles
+// literals resolving to real paths → ENOENT mkdir on build). .join() is opaque.
+const wp = (...seg) => seg.join("/");
 const LOG_PATHS = {
-  proxy: "C:/FATUR/DATA/Projects/AI APIs/Tabbit/proxy/proxy.log",
-  router: "C:/Users/hafiz/tools/9router/server.log",
+  proxy: wp("C:", "FATUR", "DATA", "Projects", "AI APIs", "Tabbit", "proxy", "proxy.log"),
+  router: wp("C:", "Users", "hafiz", "tools", "9router", "server.log"),
 };
 
 export async function GET(req) {
