@@ -19,9 +19,15 @@ function isAnthropicCompatible(provider) {
   return typeof provider === "string" && provider.startsWith(ANTHROPIC_COMPATIBLE_PREFIX);
 }
 
-function getOpenAICompatibleType(provider) {
-  if (!isOpenAICompatible(provider)) return "chat";
-  return provider.includes("responses") ? "responses" : "chat";
+// Resolve the API type (chat vs responses) for an openai-compatible node.
+// The stored apiType on the connection's providerSpecificData (kept in sync with
+// the node on create/update) is authoritative. Falls back to the node ID
+// substring for legacy nodes created before apiType was persisted — their IDs
+// embed the type: openai-compatible-<chat|responses>-<uuid>.
+export function resolveOpenAICompatibleApiType(provider, credentials = null) {
+  const stored = credentials?.providerSpecificData?.apiType;
+  if (stored === "chat" || stored === "responses") return stored;
+  return typeof provider === "string" && provider.includes("responses") ? "responses" : "chat";
 }
 
 // Detect request format from body structure
@@ -105,9 +111,9 @@ export function detectFormat(body) {
 }
 
 // Get provider config (internal — no external runtime consumer)
-function getProviderConfig(provider) {
+function getProviderConfig(provider, credentials = null) {
   if (isOpenAICompatible(provider)) {
-    const apiType = getOpenAICompatibleType(provider);
+    const apiType = resolveOpenAICompatibleApiType(provider, credentials);
     return {
       ...PROVIDERS.openai,
       format: apiType === "responses" ? "openai-responses" : "openai",
@@ -125,15 +131,25 @@ function getProviderConfig(provider) {
 }
 
 // Get target format for provider
-export function getTargetFormat(provider) {
+export function getTargetFormat(provider, credentials = null) {
   if (isOpenAICompatible(provider)) {
-    return getOpenAICompatibleType(provider) === "responses" ? "openai-responses" : "openai";
+    return resolveOpenAICompatibleApiType(provider, credentials) === "responses" ? "openai-responses" : "openai";
   }
   if (isAnthropicCompatible(provider)) {
     return "claude";
   }
-  const config = getProviderConfig(provider);
+  const config = getProviderConfig(provider, credentials);
   return config.format || "openai";
+}
+
+// Resolve which transport to use for a provider given the client sourceFormat.
+// Multi-endpoint providers (transport.transports[]) pick the entry matching sourceFormat
+// to avoid lossy translation; falls back to the default transport when no match.
+export function resolveTransport(provider, sourceFormat) {
+  const config = PROVIDERS[provider];
+  const transports = config?.transports;
+  if (!Array.isArray(transports) || !transports.length) return null;
+  return transports.find(t => t.format === sourceFormat) || null;
 }
 
 // Check if last message is from user
@@ -149,12 +165,10 @@ export function hasThinkingConfig(body) {
   return !!(body.reasoning_effort || body.thinking?.type === "enabled");
 }
 
-// Normalize thinking config based on last message role
-// - If lastMessage is not user → remove thinking config
-// - If lastMessage is user AND has thinking config → keep it (force enable)
+// Normalize provider-native thinking config based on last message role.
+// OpenAI reasoning_effort is request-level and must survive tool-result turns.
 export function normalizeThinkingConfig(body) {
   if (!isLastMessageFromUser(body)) {
-    delete body.reasoning_effort;
     delete body.thinking;
   }
   return body;

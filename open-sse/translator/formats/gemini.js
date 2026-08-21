@@ -7,11 +7,19 @@ import { OPENAI_BLOCK } from "../schema/index.js";
 export const UNSUPPORTED_SCHEMA_CONSTRAINTS = [
   // Basic constraints (not supported by Gemini API)
   "minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-  "pattern", "minItems", "maxItems", "format",
+  "minItems", "maxItems", "format", "multipleOf",
+  // Array keywords the Gemini schema proto has no field for. Agent tool
+  // schemas set these routinely, and one occurrence rejects the whole request
+  // with "Unknown name ...: Cannot find field".
+  "uniqueItems", "contains",
+  // 2020-12 keywords with no Gemini equivalent
+  "unevaluatedProperties", "unevaluatedItems", "contentSchema",
   // Claude rejects these in VALIDATED mode
   "default", "examples",
   // JSON Schema meta keywords
   "$schema", "$defs", "definitions", "const", "$ref", "$comment",
+  // Annotation keywords (rejected by Gemini/Antigravity - e.g. MCP tool schemas set these)
+  "deprecated", "readOnly", "writeOnly",
   // Object validation keywords (not supported)
   "additionalProperties", "propertyNames", "patternProperties", "enumDescriptions",
   // Complex schema keywords (handled by flattenAnyOfOneOf/mergeAllOf)
@@ -19,7 +27,7 @@ export const UNSUPPORTED_SCHEMA_CONSTRAINTS = [
   // Dependency keywords (not supported)
   "dependencies", "dependentSchemas", "dependentRequired",
   // Other unsupported keywords
-  "title", "optional", "if", "then", "else", "contentMediaType", "contentEncoding",
+  "title", "optional", "deprecated", "if", "then", "else", "contentMediaType", "contentEncoding",
   // UI/Styling properties (from Cursor tools - NOT JSON Schema standard)
   "cornerRadius", "fillColor", "fontFamily", "fontSize", "fontWeight",
   "gap", "padding", "strokeColor", "strokeThickness", "textColor"
@@ -350,6 +358,19 @@ export function cleanJSONSchemaForAntigravity(schema) {
   // Phase 5: Add placeholder for empty object schemas (Antigravity requirement)
   function addPlaceholders(obj) {
     if (!obj || typeof obj !== "object") return;
+
+    // Empty schema {} (no type, no properties) after $ref removal — treat as object with placeholder
+    if (Object.keys(obj).length === 0) {
+      obj.type = "object";
+      obj.properties = {
+        reason: {
+          type: "string",
+          description: "Brief explanation of why you are calling this tool"
+        }
+      };
+      obj.required = ["reason"];
+      return;
+    }
 
     if (obj.type === "object") {
       if (!obj.properties || Object.keys(obj.properties).length === 0) {

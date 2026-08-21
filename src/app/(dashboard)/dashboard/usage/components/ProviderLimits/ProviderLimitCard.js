@@ -164,6 +164,7 @@ export default function ProviderLimitCard({
                 percentage={percentage}
                 unlimited={unlimited}
                 resetTime={quota.resetAt}
+                recurring={quota.recurring !== false}
               />
             );
           })}

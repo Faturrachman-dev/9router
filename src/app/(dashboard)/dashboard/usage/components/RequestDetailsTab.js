@@ -82,9 +82,20 @@ function CollapsibleSection({ title, children, defaultOpen = false, icon = null 
   );
 }
 
+function getCachedTokens(tokens) {
+  return tokens?.cached_tokens || tokens?.cache_read_input_tokens || 0;
+}
+
+function getCacheCreationTokens(tokens) {
+  return tokens?.cache_creation_input_tokens || 0;
+}
+
 function getInputTokens(tokens) {
   const prompt = tokens?.prompt_tokens || tokens?.input_tokens || 0;
-  const cache = tokens?.cached_tokens || tokens?.cache_read_input_tokens || 0;
+  // Canonical storage keeps prompt cache-inclusive. Legacy Claude rows may have
+  // stored prompt cache-exclusive; fall back to cache when it's larger so old
+  // rows don't under-report input.
+  const cache = getCachedTokens(tokens);
   return prompt < cache ? cache : prompt;
 }
 
@@ -105,9 +116,7 @@ export default function RequestDetailsTab() {
     provider: "",
     startDate: "",
     endDate: ""
-  });  const [fullBodies, setFullBodies] = useState({});
-  const [loadingFull, setLoadingFull] = useState({});
-  const [bodySources, setBodySources] = useState({});
+  });
 
   const fetchProviders = useCallback(async () => {
     try {
@@ -166,91 +175,8 @@ export default function RequestDetailsTab() {
     setPagination(prev => ({ ...prev, pageSize: newPageSize, page: 1 }));
   };
 
-  const fetchFullBody = async (detailId, suffix) => {
-    const key = suffix || detailId;
-    if (fullBodies[key] || loadingFull[key]) return;
-    setLoadingFull(prev => ({ ...prev, [key]: true }));    try {
-      const res = await fetch(`/api/v1/admin/request-body/${encodeURIComponent(key)}`);
-      if (res.ok) {
-        const body = await res.json();
-        // Route returns { data, source }. Unwrap to the actual body.
-        setFullBodies(prev => ({ ...prev, [key]: body.data ?? body }));
-        setBodySources(prev => ({ ...prev, [key]: body.source || "disk" }));
-      }
-    } catch {} finally {
-      setLoadingFull(prev => ({ ...prev, [key]: false }));
-    }
-  };
-
-  const downloadFullBody = async (detailId, suffix) => {
-    const key = suffix || detailId;
-    try {
-      const res = await fetch(`/api/v1/admin/request-body/${encodeURIComponent(key)}`);
-      if (!res.ok) return;
-      const body = await res.json();
-      const payload = body.data ?? body;
-      const blob = new Blob([typeof payload === "string" ? payload : JSON.stringify(payload, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${key}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {}
-  };
-
   const handleClearFilters = () => {
     setFilters({ provider: "", startDate: "", endDate: "" });
-  };
-
-  const TruncatedSection = ({ title, data, icon, defaultOpen, detailId, suffix, type }) => {    const key = suffix || detailId;
-    const isTruncated = data?._truncated === true;
-    const originalSize = data?._originalSize;
-    const fullData = fullBodies[key];
-    const isLoading = loadingFull[key];
-    const source = bodySources[key];
-    const isPreview = source === "sqlite-preview";
-    const displayData = fullData || data;
-    return (
-      <CollapsibleSection title={title} defaultOpen={defaultOpen} icon={icon}>
-        <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-          {type === 'text' && typeof displayData === 'string'
-            ? displayData
-            : JSON.stringify(displayData, null, 2)
-          }
-        </pre>        {isTruncated && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            {!fullData && (
-              <span className="text-xs text-text-muted">
-                Truncated from {(originalSize / 1024).toFixed(1)}KB
-              </span>
-            )}
-            {fullData && isPreview && (
-              <span className="text-xs text-amber-600 dark:text-amber-400">
-                Full body not cached (pre-feature request) — showing SQLite preview
-              </span>
-            )}
-            {!fullData && (
-              <button
-                onClick={() => fetchFullBody(detailId, suffix)}
-                disabled={isLoading}
-                className="px-2 py-1 text-xs font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 disabled:opacity-50"
-              >
-                {isLoading ? "Loading..." : "Show Full"}
-              </button>
-            )}
-            <button
-              onClick={() => downloadFullBody(detailId, suffix)}
-              className="px-2 py-1 text-xs font-medium rounded border border-black/20 dark:border-white/20 text-text-main hover:bg-black/5 dark:hover:bg-white/10"
-            >
-              Download JSON
-            </button>
-          </div>
-        )}
-      </CollapsibleSection>
-    );
   };
 
   return (
@@ -329,15 +255,18 @@ export default function RequestDetailsTab() {
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Timestamp</th>
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Model</th>
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Provider</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Input Tokens</th>                <th className="text-right p-4 text-sm font-semibold text-text-main">Output Tokens</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Cost</th>
+                <th className="text-right p-4 text-sm font-semibold text-text-main">Input Tokens</th>
+                <th className="text-right p-4 text-sm font-semibold text-text-main">Cached</th>
+                <th className="text-right p-4 text-sm font-semibold text-text-main">Cache Creation</th>
+                <th className="text-right p-4 text-sm font-semibold text-text-main">Output Tokens</th>
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Latency</th>
                 <th className="text-center p-4 text-sm font-semibold text-text-main">Action</th>
               </tr>
             </thead>
             <tbody>
-              {loading ? (                <tr>
-                  <td colSpan="8" className="p-8 text-center text-text-muted">
+              {loading ? (
+                <tr>
+                  <td colSpan="7" className="p-8 text-center text-text-muted">
                     <div className="flex items-center justify-center gap-2">
                       <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
                       Loading...
@@ -346,10 +275,11 @@ export default function RequestDetailsTab() {
                 </tr>
               ) : details.length === 0 ? (
                 <tr>
-                  <td colSpan="8" className="p-8 text-center text-text-muted">
+                  <td colSpan="7" className="p-8 text-center text-text-muted">
                     No request details found
                   </td>
-                </tr>              ) : (
+                </tr>
+              ) : (
                 details.map((detail, index) => (
                   <tr
                     key={`${detail.id}-${index}`}
@@ -370,10 +300,13 @@ export default function RequestDetailsTab() {
                       {getInputTokens(detail.tokens).toLocaleString()}
                     </td>
                     <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {detail.tokens?.completion_tokens?.toLocaleString() || 0}
+                      {getCachedTokens(detail.tokens) > 0 ? getCachedTokens(detail.tokens).toLocaleString() : "—"}
                     </td>
                     <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {(typeof detail.cost === "number" ? detail.cost : 0).toFixed(6)}
+                      {getCacheCreationTokens(detail.tokens) > 0 ? getCacheCreationTokens(detail.tokens).toLocaleString() : "—"}
+                    </td>
+                    <td className="p-4 text-sm text-text-main text-right font-mono">
+                      {detail.tokens?.completion_tokens?.toLocaleString() || 0}
                     </td>
                     <td className="p-4 text-sm text-text-muted">
                       <div className="flex flex-col gap-0.5">
@@ -455,48 +388,97 @@ export default function RequestDetailsTab() {
                 <span className="text-text-main font-mono">
                   {getInputTokens(selectedDetail.tokens).toLocaleString()}
                 </span>
-              </div>              <div>
+              </div>
+              {getCachedTokens(selectedDetail.tokens) > 0 && (
+                <div>
+                  <span className="text-text-muted">Cached Tokens:</span>{" "}
+                  <span className="text-text-main font-mono">
+                    {getCachedTokens(selectedDetail.tokens).toLocaleString()}
+                  </span>
+                </div>
+              )}
+              {getCacheCreationTokens(selectedDetail.tokens) > 0 && (
+                <div>
+                  <span className="text-text-muted">Cache Creation:</span>{" "}
+                  <span className="text-text-main font-mono">
+                    {getCacheCreationTokens(selectedDetail.tokens).toLocaleString()}
+                  </span>
+                </div>
+              )}
+              <div>
                 <span className="text-text-muted">Output Tokens:</span>{" "}
                 <span className="text-text-main font-mono">
                   {selectedDetail.tokens?.completion_tokens?.toLocaleString() || 0}
                 </span>
               </div>
-              <div>
-                <span className="text-text-muted">Cost:</span>{" "}
-                <span className="text-text-main font-mono">
-                  {(typeof selectedDetail.cost === "number" ? selectedDetail.cost : 0).toFixed(6)}
-                </span>
-              </div>
             </div>
-            
+
+            {selectedDetail.pxpipe && (
+              <div className="rounded-lg border border-black/5 dark:border-white/5 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="material-symbols-outlined text-[18px] text-text-muted">image</span>
+                  <span className="font-semibold text-sm text-text-main">PXPIPE</span>
+                  <span className={cn(
+                    "text-xs px-2 py-0.5 rounded",
+                    selectedDetail.pxpipe.applied
+                      ? "bg-green-500/15 text-green-600"
+                      : "bg-amber-500/15 text-amber-600"
+                  )}>
+                    {selectedDetail.pxpipe.applied ? "Activated" : "Skipped"}
+                  </span>
+                </div>
+                {selectedDetail.pxpipe.applied ? (
+                  <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+                    <div>
+                      <span className="text-text-muted block text-xs">Original (est.)</span>
+                      <span className="font-mono">{(selectedDetail.pxpipe.tokensBeforeEst || 0).toLocaleString()} tokens</span>
+                    </div>
+                    <div>
+                      <span className="text-text-muted block text-xs">Compressed (est.)</span>
+                      <span className="font-mono">{(selectedDetail.pxpipe.tokensAfterEst || 0).toLocaleString()} tokens</span>
+                    </div>
+                    <div>
+                      <span className="text-text-muted block text-xs">Saved</span>
+                      <span className="font-mono text-green-600">{selectedDetail.pxpipe.savedPct || 0}%</span>
+                    </div>
+                    <div>
+                      <span className="text-text-muted block text-xs">Images</span>
+                      <span className="font-mono">{selectedDetail.pxpipe.imageCount || 0} ({selectedDetail.pxpipe.durationMs || 0}ms)</span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-text-muted">
+                    Reason: <span className="font-mono">{selectedDetail.pxpipe.reason}</span>
+                    {selectedDetail.pxpipe.detail ? ` — ${selectedDetail.pxpipe.detail}` : ""}
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="space-y-4">
-              <TruncatedSection
-                title="1. Client Request (Input)"
-                data={selectedDetail.request}
-                icon="input"
-                defaultOpen={true}
-                detailId={selectedDetail.id}
-              />
+              <CollapsibleSection title="1. Client Request (Input)" defaultOpen={true} icon="input">
+                <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
+                  {JSON.stringify(selectedDetail.request, null, 2)}
+                </pre>
+              </CollapsibleSection>
 
               {selectedDetail.providerRequest && (
-                <TruncatedSection
-                  title="2. Provider Request (Translated)"
-                  data={selectedDetail.providerRequest}
-                  icon="translate"
-                  detailId={selectedDetail.id}
-                  suffix={selectedDetail.id + "_preq"}
-                />
+                <CollapsibleSection title="2. Provider Request (Translated)" icon="translate">
+                  <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
+                    {JSON.stringify(selectedDetail.providerRequest, null, 2)}
+                  </pre>
+                </CollapsibleSection>
               )}
 
               {selectedDetail.providerResponse && (
-                <TruncatedSection
-                  title="3. Provider Response (Raw)"
-                  data={selectedDetail.providerResponse}
-                  icon="data_object"
-                  detailId={selectedDetail.id}
-                  suffix={selectedDetail.id + "_pres"}
-                  type={typeof selectedDetail.providerResponse === 'string' ? 'text' : 'json'}
-                />
+                <CollapsibleSection title="3. Provider Response (Raw)" icon="data_object">
+                  <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
+                    {typeof selectedDetail.providerResponse === 'object'
+                      ? JSON.stringify(selectedDetail.providerResponse, null, 2)
+                      : selectedDetail.providerResponse
+                    }
+                  </pre>
+                </CollapsibleSection>
               )}
               
               <CollapsibleSection title="4. Client Response (Final)" defaultOpen={true} icon="output">
