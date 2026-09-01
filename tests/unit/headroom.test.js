@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog } from "../../open-sse/rtk/headroom.js";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -35,6 +36,38 @@ describe("compressWithHeadroom", () => {
       model: "gpt-4o",
       messages: [{ role: "user", content: "long" }],
     });
+  });
+
+  it("waits through a transient ECONNREFUSED while the proxy starts", async () => {
+    vi.useFakeTimers();
+    const refused = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8787"), {
+        code: "ECONNREFUSED",
+      }),
+    });
+    global.fetch = vi.fn()
+      .mockRejectedValueOnce(refused)
+      .mockRejectedValueOnce(refused)
+      .mockResolvedValue(new Response(JSON.stringify({
+        messages: [{ role: "user", content: "short" }],
+        tokens_saved: 25,
+      }), { status: 200 }));
+    const body = { messages: [{ role: "user", content: "long" }] };
+    const diagnostics = {};
+
+    const pending = compressWithHeadroom(body, {
+      enabled: true,
+      url: "http://localhost:8787",
+      model: "gpt-4o",
+      diagnostics,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    const stats = await pending;
+
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(stats.tokens_saved).toBe(25);
+    expect(body.messages[0].content).toBe("short");
+    expect(diagnostics.connectionRetries).toBe(2);
   });
 
   it("compresses responses input in-place", async () => {
@@ -149,6 +182,94 @@ describe("compressWithHeadroom", () => {
     expect(body.profileArn).toBe("arn:test");
     expect(body.conversationState.currentMessage.userInputMessage.userInputMessageContext.tools)
       .toEqual([{ toolSpecification: { name: "read_file" } }]);
+  });
+
+  it("compresses CommandCode params.messages + system in-place", async () => {
+    let requestPayload;
+    global.fetch = vi.fn(async (_url, init) => {
+      requestPayload = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        messages: [
+          { role: "system", content: "sys!" },
+          { role: "user", content: "u1!" },
+          { role: "assistant", content: "a1!", tool_calls: [{ id: "call_1", type: "function", function: { name: "Read", arguments: "{\"path\":\"/x\"}" } }] },
+          { role: "tool", content: [{ type: "text", text: "tr!" }], tool_call_id: "call_1" },
+        ],
+        tokens_before: 100,
+        tokens_after: 30,
+        tokens_saved: 70,
+      }), { status: 200 });
+    });
+    const body = {
+      threadId: "keep-me",
+      config: { workingDir: "/w" },
+      params: {
+        model: "deepseek/deepseek-v4-pro",
+        system: "you are helpful",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "long user text" }] },
+          { role: "assistant", content: [
+            { type: "text", text: "long assistant text" },
+            { type: "tool-call", toolCallId: "call_1", toolName: "Read", input: { path: "/x" } },
+          ] },
+          { role: "tool", content: [
+            { type: "tool-result", toolCallId: "call_1", toolName: "Read", output: { type: "text", value: "long tool output" } },
+          ] },
+        ],
+      },
+    };
+
+    const stats = await compressWithHeadroom(body, {
+      enabled: true,
+      url: "http://localhost:8787",
+      model: "deepseek/deepseek-v4-pro",
+      format: "commandcode",
+    });
+
+    expect(stats.tokens_saved).toBe(70);
+    // Projected to OpenAI messages for the proxy, system first, tool_calls as context.
+    expect(requestPayload.messages).toEqual([
+      { role: "system", content: "you are helpful" },
+      { role: "user", content: "long user text" },
+      { role: "assistant", content: "long assistant text", tool_calls: [{ id: "call_1", type: "function", function: { name: "Read", arguments: "{\"path\":\"/x\"}" } }] },
+      { role: "tool", content: "long tool output", tool_call_id: "call_1" },
+    ]);
+    // Compressed text written back into the original CommandCode blocks.
+    expect(body.params.system).toBe("sys!");
+    expect(body.params.messages[0].content[0].text).toBe("u1!");
+    expect(body.params.messages[1].content[0].text).toBe("a1!");
+    expect(body.params.messages[2].content[0].output.value).toBe("tr!");
+    // Provider payload structure preserved.
+    expect(body.threadId).toBe("keep-me");
+    expect(body.params.messages[1].content[1]).toEqual({ type: "tool-call", toolCallId: "call_1", toolName: "Read", input: { path: "/x" } });
+  });
+
+  it("fails open when CommandCode output does not preserve message order", async () => {
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      // projection is [system, user]; return same count but wrong first role.
+      messages: [{ role: "assistant", content: "wrong role" }, { role: "user", content: "x" }],
+      tokens_saved: 10,
+    }), { status: 200 }));
+    const body = {
+      params: {
+        system: "sys",
+        messages: [{ role: "user", content: [{ type: "text", text: "original" }] }],
+      },
+    };
+    const original = structuredClone(body);
+    const diagnostics = {};
+
+    const stats = await compressWithHeadroom(body, {
+      enabled: true,
+      url: "http://localhost:8787",
+      model: "deepseek/deepseek-v4-pro",
+      format: "commandcode",
+      diagnostics,
+    });
+
+    expect(stats).toBeNull();
+    expect(body).toEqual(original);
+    expect(diagnostics.reason).toBe("proxy response did not preserve CommandCode message order");
   });
 
   it("fails open when Kiro Headroom output does not preserve message order", async () => {

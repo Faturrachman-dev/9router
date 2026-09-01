@@ -87,8 +87,8 @@ describe("openaiToCommandCodeRequest — content shape", () => {
   });
 });
 
-describe("openaiToCommandCodeRequest — tool role / tool-result (AI SDK)", () => {
-  it("converts role:\"tool\" to role:\"tool\" with tool-result block; output is {type:\"text\",value}", () => {
+describe("openaiToCommandCodeRequest — historical tool compatibility", () => {
+  it("flattens historical tool results to labeled user text for CommandCode compatibility", () => {
     const out = openaiToCommandCodeRequest(MODEL, {
       messages: [
         { role: "user", content: "run X" },
@@ -103,24 +103,38 @@ describe("openaiToCommandCodeRequest — tool role / tool-result (AI SDK)", () =
       ],
     }, true);
 
-    const toolMsg = out.params.messages[out.params.messages.length - 1];
-    expect(toolMsg.role).toBe("tool");
-    const block = toolMsg.content[0];
-    expect(block.type).toBe("tool-result");
-    expect(block.toolCallId).toBe("call_1");
-    expect(block.toolName).toBe("do_x");
-    expect(block.output).toEqual({ type: "text", value: "RESULT_OK" });
+    expect(out.params.messages).toHaveLength(1);
+    const transcript = out.params.messages[0];
+    expect(transcript.role).toBe("user");
+    expect(transcript.content[0].text).toContain("[tool result do_x call_1]\nRESULT_OK");
+  });
+
+  it("recovers an omitted tool-result name from the matching assistant call id", () => {
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [
+        {
+          role: "assistant",
+          content: "I will search.",
+          tool_calls: [
+            { id: "call_2", type: "function", function: { name: "lookup", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_2", content: "FOUND" },
+      ],
+    }, true);
+
+    expect(out.params.messages[0].content[0].text).toContain("lookup");
   });
 });
 
-describe("openaiToCommandCodeRequest — assistant tool_calls / tool-call", () => {
-  it("converts assistant.tool_calls[] into content blocks of type tool-call", () => {
+describe("openaiToCommandCodeRequest — historical assistant tool calls", () => {
+  it("flattens historical assistant tool calls to labeled text with arguments", () => {
     const out = openaiToCommandCodeRequest(MODEL, {
       messages: [
         { role: "user", content: "go" },
         {
           role: "assistant",
-          content: null,
+          content: "I will search.",
           tool_calls: [
             { id: "call_42", type: "function", function: { name: "search", arguments: "{\"q\":\"hi\"}" } },
           ],
@@ -128,13 +142,38 @@ describe("openaiToCommandCodeRequest — assistant tool_calls / tool-call", () =
       ],
     }, true);
 
-    const asst = out.params.messages[1];
-    expect(asst.role).toBe("assistant");
-    const tc = asst.content.find((b) => b.type === "tool-call");
-    expect(tc).toBeDefined();
-    expect(tc.toolCallId).toBe("call_42");
-    expect(tc.toolName).toBe("search");
-    expect(tc.input).toEqual({ q: "hi" });
+    expect(out.params.messages).toHaveLength(1);
+    const transcript = out.params.messages[0];
+    expect(transcript.role).toBe("user");
+    const text = transcript.content.map((b) => b.text || "").join("\n");
+    expect(text).toContain("I will search.");
+    expect(text).toContain('[tool call search call_42] {"q":"hi"}');
+  });
+
+  it("preserves image blocks when collapsing tool history", () => {
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [
+        { role: "user", content: [
+          { type: "text", text: "look" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+        ] },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_img", type: "function", function: { name: "inspect", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_img", content: "done" },
+      ],
+    }, true);
+
+    expect(out.params.messages).toHaveLength(1);
+    expect(out.params.messages[0].content).toContainEqual({
+      type: "image",
+      image: "AAAA",
+      mediaType: "image/png",
+    });
   });
 });
 

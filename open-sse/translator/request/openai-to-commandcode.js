@@ -5,8 +5,9 @@
  *  - params.system: STRING at top level (Anthropic-style; system messages NOT allowed in messages[])
  *  - params.messages[*].role ∈ {"user","assistant","tool"}
  *  - params.messages[*].content: Array of content blocks (NEVER a string)
- *  - tool_use blocks (assistant): {type:"tool-call", toolCallId, toolName, input}
- *  - tool_result blocks (role=user): {type:"tool-result", toolCallId, toolName, output}
+ *  - Historical tool calls/results are serialized as labeled text because the
+ *    current CommandCode/Muse bridge rejects structured history with a missing
+ *    `arguments` error. Active tools remain structured in params.tools.
  *  - tools[*]: Anthropic plain {name, description, input_schema}
  */
 import { register } from "../index.js";
@@ -63,15 +64,17 @@ function toContentBlocks(content) {
   return [{ type: OPENAI_BLOCK.TEXT, text: String(content) }];
 }
 
-function safeParseJson(s) {
-  if (s == null) return {};
-  if (typeof s !== "string") return s;
-  try { return JSON.parse(s); } catch { return {}; }
+function stringifyToolArguments(value) {
+  if (value == null) return "{}";
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value); } catch { return "{}"; }
 }
 
 function convertMessages(messages = []) {
   const out = [];
   const systemTexts = [];
+  const toolNamesByCallId = new Map();
+  let hasToolHistory = false;
 
   for (const m of messages) {
     if (!m) continue;
@@ -84,39 +87,72 @@ function convertMessages(messages = []) {
     }
 
     if (role === ROLE.TOOL) {
+      hasToolHistory = true;
       const value = typeof m.content === "string" ? m.content : flattenText(m.content);
+      const toolCallId = m.tool_call_id || "";
+      const toolName = m.name || toolNamesByCallId.get(toolCallId) || "unknown";
       out.push({
-        role: ROLE.TOOL,
+        // CommandCode currently rejects structured historical tool calls/results
+        // after flattening them to its Responses input (`missing arguments`). Keep
+        // the full history as labeled text; current tools remain structured in
+        // params.tools, so the model can still make new calls.
+        role: ROLE.USER,
         content: [{
-          type: "tool-result",
-          toolCallId: m.tool_call_id || "",
-          toolName: m.name || "",
-          output: { type: "text", value },
+          type: OPENAI_BLOCK.TEXT,
+          text: `[tool result ${toolName}${toolCallId ? ` ${toolCallId}` : ""}]\n${value}`,
         }],
       });
       continue;
     }
 
     if (role === ROLE.ASSISTANT) {
-      const blocks = [];
+      const textParts = [];
       const text = flattenText(m.content);
-      if (text) blocks.push({ type: OPENAI_BLOCK.TEXT, text });
+      if (text) textParts.push(text);
       if (Array.isArray(m.tool_calls)) {
+        if (m.tool_calls.length > 0) hasToolHistory = true;
         for (const tc of m.tool_calls) {
           const fn = tc.function || {};
-          blocks.push({
-            type: "tool-call",
-            toolCallId: tc.id || "",
-            toolName: fn.name || "",
-            input: safeParseJson(fn.arguments),
-          });
+          const toolCallId = tc.id || "";
+          const toolName = fn.name || "unknown";
+          if (toolCallId && fn.name) toolNamesByCallId.set(toolCallId, fn.name);
+          textParts.push(
+            `[tool call ${toolName}${toolCallId ? ` ${toolCallId}` : ""}] ${stringifyToolArguments(fn.arguments)}`
+          );
         }
       }
-      out.push({ role: ROLE.ASSISTANT, content: blocks.length ? blocks : [{ type: OPENAI_BLOCK.TEXT, text: "" }] });
+      out.push({
+        role: ROLE.ASSISTANT,
+        content: [{ type: OPENAI_BLOCK.TEXT, text: textParts.join("\n") }],
+      });
       continue;
     }
 
     out.push({ role: ROLE.USER, content: toContentBlocks(m.content) });
+  }
+
+  if (hasToolHistory) {
+    const transcript = [];
+    const nonTextBlocks = [];
+    for (const message of out) {
+      const text = message.content
+        .filter((block) => block?.type === OPENAI_BLOCK.TEXT)
+        .map((block) => block.text || "")
+        .filter(Boolean)
+        .join("\n");
+      if (text) transcript.push(`[${message.role}] ${text}`);
+      nonTextBlocks.push(...message.content.filter((block) => block?.type !== OPENAI_BLOCK.TEXT));
+    }
+    return {
+      messages: [{
+        role: ROLE.USER,
+        content: [
+          { type: OPENAI_BLOCK.TEXT, text: transcript.join("\n") },
+          ...nonTextBlocks,
+        ],
+      }],
+      system: systemTexts.join("\n\n"),
+    };
   }
 
   return { messages: out, system: systemTexts.join("\n\n") };

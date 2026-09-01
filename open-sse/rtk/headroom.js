@@ -4,8 +4,13 @@ import {
   openaiResponsesToOpenAIRequest,
   openaiToOpenAIResponsesRequest,
 } from "../translator/request/openai-responses.js";
+import {
+  HEADROOM_CONNECT_RETRY_INTERVAL_MS,
+  HEADROOM_CONNECT_RETRY_WINDOW_MS,
+  HEADROOM_REQUEST_TIMEOUT_MS,
+} from "../config/runtimeConfig.js";
 
-const DEFAULT_TIMEOUT_MS = 3000;
+const DEFAULT_TIMEOUT_MS = HEADROOM_REQUEST_TIMEOUT_MS;
 
 function jsonBytes(value) {
   try {
@@ -18,6 +23,7 @@ function jsonBytes(value) {
 function messagePayload(body) {
   if (Array.isArray(body?.messages)) return body.messages;
   if (Array.isArray(body?.input)) return body.input;
+  if (Array.isArray(body?.params?.messages)) return body.params.messages;
   const kiro = collectKiroHeadroomMessages(body);
   if (kiro) return kiro.messages;
   return null;
@@ -54,6 +60,16 @@ function describeFetchError(error) {
   const code = cause?.code || error?.code;
   const message = scrubSensitiveUrlText(cause?.message || error?.message || String(error));
   return code ? `${code}: ${message}` : message;
+}
+
+function isConnectionRefused(error) {
+  const candidates = [
+    error,
+    error?.cause,
+    ...(Array.isArray(error?.errors) ? error.errors : []),
+    ...(Array.isArray(error?.cause?.errors) ? error.cause.errors : []),
+  ];
+  return candidates.some((candidate) => candidate?.code === "ECONNREFUSED");
 }
 
 function buildCompressEndpoint(url) {
@@ -177,9 +193,13 @@ function textFromHeadroomMessage(message) {
   return parts.length > 0 ? parts.join("\n") : null;
 }
 
-function applyKiroHeadroomMessages(projection, compressedMessages, diagnostics) {
+// Splice compressed text back into a projected body (Kiro/CommandCode). The
+// projection carries per-message {object,key} targets; the proxy must return
+// the same messages in the same order/roles or we bail (fail-open). `label`
+// names the shape in diagnostics.
+function applyProjectedHeadroomMessages(projection, compressedMessages, diagnostics, label) {
   if (!Array.isArray(compressedMessages) || compressedMessages.length !== projection.messages.length) {
-    setDiagnostic(diagnostics, "proxy response did not match Kiro message count");
+    setDiagnostic(diagnostics, `proxy response did not match ${label} message count`);
     return false;
   }
 
@@ -188,13 +208,13 @@ function applyKiroHeadroomMessages(projection, compressedMessages, diagnostics) 
     const expected = projection.messages[i];
     const actual = compressedMessages[i];
     if (!actual || actual.role !== expected.role) {
-      setDiagnostic(diagnostics, "proxy response did not preserve Kiro message order");
+      setDiagnostic(diagnostics, `proxy response did not preserve ${label} message order`);
       return false;
     }
 
     const text = textFromHeadroomMessage(actual);
     if (text === null) {
-      setDiagnostic(diagnostics, "proxy response missing Kiro text content");
+      setDiagnostic(diagnostics, `proxy response missing ${label} text content`);
       return false;
     }
     updates.push({ target: projection.targets[i], text });
@@ -206,6 +226,83 @@ function applyKiroHeadroomMessages(projection, compressedMessages, diagnostics) 
   return true;
 }
 
+// Project a CommandCode request (params.system + params.messages[] with AI-SDK
+// content blocks) to OpenAI messages for the proxy, recording {object,key}
+// targets so the compressed text can be written back into the original blocks.
+// Only text is compressible: user/assistant text blocks, tool-result output
+// values, and the top-level system string. tool-call inputs are attached as
+// context (not compressed). Non-text blocks (images) are left untouched.
+function collectCommandCodeHeadroomMessages(body) {
+  const params = body?.params;
+  if (!params || typeof params !== "object") return null;
+  const src = params.messages;
+  if (!Array.isArray(src)) return null;
+
+  const messages = [];
+  const targets = [];
+
+  const addTextTarget = (role, text, target, extra = {}) => {
+    if (typeof text !== "string") return;
+    messages.push({ role, content: text, ...extra });
+    targets.push(target);
+  };
+
+  addTextTarget("system", params.system, { object: params, key: "system" });
+
+  for (const m of src) {
+    if (!m || typeof m !== "object" || !Array.isArray(m.content)) continue;
+    const role = m.role;
+
+    if (role === "tool") {
+      for (const part of m.content) {
+        const output = part?.output;
+        if (part?.type === "tool-result" && output && typeof output.value === "string") {
+          addTextTarget(
+            "tool",
+            output.value,
+            { object: output, key: "value" },
+            part.toolCallId ? { tool_call_id: part.toolCallId } : {}
+          );
+        }
+      }
+      continue;
+    }
+
+    if (role === "assistant") {
+      const toolCalls = [];
+      for (const part of m.content) {
+        if (part?.type === "tool-call") {
+          toolCalls.push({
+            id: part.toolCallId,
+            type: "function",
+            function: { name: part.toolName || "", arguments: JSON.stringify(part.input || {}) },
+          });
+        }
+      }
+      // Attach the turn's tool_calls to its first text block (context only, not
+      // a target). Assistant turns with no text block are skipped — same as Kiro.
+      let attached = false;
+      for (const part of m.content) {
+        if (part?.type === "text" && typeof part.text === "string") {
+          const extra = !attached && toolCalls.length ? { tool_calls: toolCalls } : {};
+          addTextTarget("assistant", part.text, { object: part, key: "text" }, extra);
+          attached = true;
+        }
+      }
+      continue;
+    }
+
+    // user (and any other role): only text blocks are compressible.
+    for (const part of m.content) {
+      if (part?.type === "text" && typeof part.text === "string") {
+        addTextTarget("user", part.text, { object: part, key: "text" });
+      }
+    }
+  }
+
+  return messages.length > 0 ? { messages, targets } : null;
+}
+
 // POST messages to Headroom /v1/compress; returns compressed messages + stats or null.
 async function callCompress(url, messages, model, timeoutMs, compressUserMessages, diagnostics) {
   const endpoint = buildCompressEndpoint(url);
@@ -213,16 +310,28 @@ async function callCompress(url, messages, model, timeoutMs, compressUserMessage
   const payload = { messages, model };
   if (compressUserMessages) payload.config = { compress_user_messages: true };
   let res;
-  try {
-    res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    setDiagnostic(diagnostics, `request failed: ${describeFetchError(error)}`);
-    return null;
+  const retryStartedAt = Date.now();
+  while (!res) {
+    try {
+      res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error) {
+      const elapsed = Date.now() - retryStartedAt;
+      if (!isConnectionRefused(error) || elapsed >= HEADROOM_CONNECT_RETRY_WINDOW_MS) {
+        setDiagnostic(diagnostics, `request failed: ${describeFetchError(error)}`);
+        return null;
+      }
+      diagnostics.connectionRetries = (diagnostics.connectionRetries || 0) + 1;
+      const remaining = HEADROOM_CONNECT_RETRY_WINDOW_MS - elapsed;
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        Math.min(HEADROOM_CONNECT_RETRY_INTERVAL_MS, remaining)
+      ));
+    }
   }
   if (!res.ok) {
     setDiagnostic(diagnostics, `proxy returned HTTP ${res.status}`);
@@ -307,7 +416,24 @@ export async function compressWithHeadroom(body, { enabled, url, model, format, 
       }
       const data = await callCompress(url, projection.messages, model, timeoutMs, compressUserMessages, diagnostics || {});
       if (!data) return null;
-      if (!applyKiroHeadroomMessages(projection, data.messages, diagnostics)) return null;
+      if (!applyProjectedHeadroomMessages(projection, data.messages, diagnostics, "Kiro")) return null;
+      if (diagnostics) diagnostics.after = captureSizeSnapshot(body);
+      return data;
+    }
+
+    // CommandCode shape: params.messages hold AI-SDK content blocks and params.system
+    // is a top-level string. Project compressible text to OpenAI messages for the
+    // proxy, then write the shrunk text back into the original blocks. Keep the
+    // provider payload (threadId/config/params) intact for CommandCode's executor.
+    if (format === "commandcode") {
+      const projection = collectCommandCodeHeadroomMessages(body);
+      if (!projection) {
+        setDiagnostic(diagnostics, "CommandCode request did not project to messages[]");
+        return null;
+      }
+      const data = await callCompress(url, projection.messages, model, timeoutMs, compressUserMessages, diagnostics || {});
+      if (!data) return null;
+      if (!applyProjectedHeadroomMessages(projection, data.messages, diagnostics, "CommandCode")) return null;
       if (diagnostics) diagnostics.after = captureSizeSnapshot(body);
       return data;
     }

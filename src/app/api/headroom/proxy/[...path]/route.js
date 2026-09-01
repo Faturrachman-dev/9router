@@ -50,10 +50,18 @@ function forwardedHeaders(request, target) {
 }
 
 function rewriteDashboardHtml(html) {
-  return html.replace(
-    /fetch\('(?=\/(?:stats|health|stats-history|transformations\/feed))/g,
-    `fetch('${DASHBOARD_PREFIX}`,
-  );
+  return html
+    // Headroom's dashboard serves its own assets and links under absolute-root
+    // /dashboard/* (tailwind/htmx/alpine, settings link). Behind this proxy
+    // prefix those resolve against the 9router origin and 404 — leaving
+    // `tailwind is not defined`. Re-point them through the proxy.
+    .replace(/((?:src|href)=")\/dashboard\b/g, `$1${DASHBOARD_PREFIX}/dashboard`)
+    // Live-data fetches the dashboard makes to Headroom's root API. `stats`
+    // also covers /stats-history and /stats-lifetime (prefix match).
+    .replace(
+      /fetch\('(?=\/(?:stats|health|transformations\/feed))/g,
+      `fetch('${DASHBOARD_PREFIX}`,
+    );
 }
 
 async function proxy(request, { params }) {
@@ -78,15 +86,15 @@ async function proxy(request, { params }) {
       if (HOP_BY_HOP_HEADERS.has(header.toLowerCase())) headers.delete(header);
     }
 
-    if (path.join("/") === "dashboard") {
-      const contentType = response.headers.get("content-type") || "";
-      if (contentType.includes("text/html")) {
-        headers.delete("content-length");
-        return new NextResponse(rewriteDashboardHtml(await response.text()), {
-          status: response.status,
-          headers,
-        });
-      }
+    // Any HTML the dashboard serves (/dashboard, /dashboard/settings, …) needs
+    // its absolute-root asset/API URLs re-pointed through the proxy prefix.
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) {
+      headers.delete("content-length");
+      return new NextResponse(rewriteDashboardHtml(await response.text()), {
+        status: response.status,
+        headers,
+      });
     }
 
     return new NextResponse(response.body, { status: response.status, headers });

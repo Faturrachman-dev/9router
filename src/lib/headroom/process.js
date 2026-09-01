@@ -86,25 +86,37 @@ export async function startHeadroomProxy({ port = DEFAULT_PORT, codeAware = fals
   child.unref();
   writePid(child.pid);
 
+  // Close the parent's copy of the log fd exactly once. The success path (timer)
+  // and the failure path (exit) can both reach here; a second fs.closeSync on an
+  // already-closed fd throws `EBADF: bad file descriptor, close`, which surfaced
+  // as a 500 on restart and left the proxy orphaned (untracked pid).
+  let outFdClosed = false;
+  const closeOutFd = () => {
+    if (outFdClosed) return;
+    outFdClosed = true;
+    try { fs.closeSync(outFd); } catch { /* already closed */ }
+  };
+
   // Wait until the process either stays alive briefly (success) or exits fast (failure).
   await new Promise((resolve, reject) => {
-    const startupTimer = setTimeout(() => {
-      if (isPidAlive(child.pid)) resolve();
-      else reject(new Error("headroom proxy exited during startup — see proxy.log"));
-    }, STARTUP_TIMEOUT_MS);
-
-    child.once("exit", (code) => {
+    const onExit = (code) => {
       clearTimeout(startupTimer);
       clearPid();
-      fs.closeSync(outFd);
+      closeOutFd();
       const e = new Error(`headroom proxy exited early (code=${code}) — see proxy.log`);
       e.code = "EARLY_EXIT";
       reject(e);
-    });
+    };
+    const startupTimer = setTimeout(() => {
+      // Detach the exit listener so a later crash can't double-close the fd.
+      child.removeListener("exit", onExit);
+      if (isPidAlive(child.pid)) resolve();
+      else reject(new Error("headroom proxy exited during startup — see proxy.log"));
+    }, STARTUP_TIMEOUT_MS);
+    child.once("exit", onExit);
   });
 
-  // Close parent's copy of the fd; child retains its own after unref.
-  fs.closeSync(outFd);
+  closeOutFd();
 
   return { pid: child.pid, alreadyRunning: false };
 }

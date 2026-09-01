@@ -58,6 +58,13 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
+// Headroom is a local sidecar that can take 10-50s to bind after a supervised
+// restart on Windows (especially while builds are loading the machine). Retry
+// only connection-refused startup races; other failures remain fail-open.
+export const HEADROOM_CONNECT_RETRY_WINDOW_MS = envMs("HEADROOM_CONNECT_RETRY_WINDOW_MS", 60 * 1000);
+export const HEADROOM_CONNECT_RETRY_INTERVAL_MS = envMs("HEADROOM_CONNECT_RETRY_INTERVAL_MS", 500);
+export const HEADROOM_REQUEST_TIMEOUT_MS = envMs("HEADROOM_REQUEST_TIMEOUT_MS", 30 * 1000);
+
 // Gemini native TTS fetch timeout: abort if Google does not return response headers in time.
 export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS", 45 * 1000);
 

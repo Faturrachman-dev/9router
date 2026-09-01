@@ -14,6 +14,8 @@ import {
   WATCHDOG_INTERVAL_MS, NETWORK_CHECK_INTERVAL_MS, VIRTUAL_IFACE_REGEX,
 } from "@/lib/tunnel";
 import { autoStartServices } from "@/lib/serviceManager";
+import { startHeadroomProxy } from "@/lib/headroom/process";
+import { DEFAULT_HEADROOM_URL, isLoopbackHeadroomUrl, probeProxyRunning } from "@/lib/headroom/detect";
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
@@ -49,6 +51,7 @@ const g = global.__appSingleton ??= {
   tunnelAutoResumed: false,
   tailscaleAutoResumed: false,
   proxiesAutoStarted: false,
+  headroomAutoStarted: false,
 };
 
 export async function initializeApp() {
@@ -111,6 +114,12 @@ async function runHeavyStartup() {
     autoStartMitm(settings);
   }
 
+  // Headroom token-saver proxy: a detached child managed via PID file. It does
+  // NOT autostart otherwise, so after a machine reboot / proxy crash the saver
+  // silently no-ops (ECONNREFUSED, fail-open) until the dashboard Start button
+  // is clicked. Bring it up on boot when the saver is enabled.
+  if (settings.headroomEnabled) autoStartHeadroom(settings);
+
   configureTunnelMonitoring(settings);
 
   if (hasQuotaAutoPingEnabled(settings)) {
@@ -161,6 +170,38 @@ async function autoStartMitm(settings) {
     console.log("[InitApp] MITM auto-start failed:", err.message);
   } finally {
     g.mitmStartInProgress = false;
+  }
+}
+
+// Start the loopback Headroom compress proxy once per process when the saver is
+// enabled. Skips when the URL is external (user runs those themselves) or when a
+// proxy is already reachable — a proxy started from the dashboard or one that
+// survived a 9Router restart must not be re-spawned (a second bind fails with
+// EADDRINUSE / EARLY_EXIT). Fail-open: the token saver already no-ops when the
+// proxy is unreachable, so a failed start never blocks requests.
+async function autoStartHeadroom(settings) {
+  if (g.headroomAutoStarted) return;
+  g.headroomAutoStarted = true;
+  try {
+    const url = settings.headroomUrl || DEFAULT_HEADROOM_URL;
+    if (!isLoopbackHeadroomUrl(url)) return;
+    if (await probeProxyRunning(url)) return;
+
+    let port = 8787;
+    try {
+      const p = parseInt(new URL(url).port, 10);
+      if (p > 0 && p < 65536) port = p;
+    } catch { /* keep default */ }
+
+    console.log("[InitApp] Headroom was enabled, auto-starting proxy...");
+    await startHeadroomProxy({
+      port,
+      codeAware: settings.headroomCodeAware === true,
+      kompress: settings.headroomKompress !== false,
+    });
+    console.log("[InitApp] Headroom proxy auto-started");
+  } catch (err) {
+    console.log("[InitApp] Headroom proxy auto-start failed:", err.message);
   }
 }
 
