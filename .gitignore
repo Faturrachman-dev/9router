@@ -79,6 +79,9 @@ open-sse.old/
 # local runtime logs (personal)
 boot.log
 build.log
+build-verify.log
+rebuild-verify.log
+server-restart.log
 9router-boot.log
 9router-run.log
 9router-menu.log
