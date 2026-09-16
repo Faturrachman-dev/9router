@@ -51,6 +51,7 @@ function loadConfig() {
     runTimeoutMs: Number(cfg.runTimeoutMs || 15 * 60 * 1000),
     defaultModel: cfg.defaultModel || "z-ai/glm-5.3-flash",
     maxConcurrent: Number(cfg.maxConcurrent || 3), // Hoplite sandbox limit (nikita4a lesson)
+    minCredits: Number(cfg.minCredits ?? 1), // circuit breaker: reject new runs below this balance ($)
     maxThreads: 100,
     threadTtlMs: 12 * 60 * 60 * 1000,
   };
@@ -73,6 +74,37 @@ function releaseRunSlot() {
 
 const BASE = "https://api.hoplite.sh";
 const stats = { requests: 0, runs: 0, errors: 0, contentChars: 0, startedAt: new Date().toISOString() };
+
+// ------------------------------------------------------------ credits monitor --
+// GET /api/billing/summary is undocumented (absent from openapi.json) but works
+// with the org hop_ key. Polled with a cache; drives lowCredits + circuit breaker.
+const credits = { data: null, at: 0, circuitOpen: false };
+async function refreshCredits(force = false) {
+  if (!force && credits.data && Date.now() - credits.at < 60000) return credits.data;
+  try {
+    const r = await hopFetch("GET", "/api/billing/summary", undefined, { timeoutMs: 10000 });
+    if (r.status === 200 && r.json?.ok && r.json?.billing) {
+      credits.data = r.json.billing;
+      credits.at = Date.now();
+      const remaining = Number(r.json.billing.remainingCredits);
+      credits.circuitOpen = Number.isFinite(remaining) && remaining < CFG.minCredits;
+      if (credits.circuitOpen) console.error(`[hoplite] CIRCUIT OPEN: remainingCredits ${remaining} < ${CFG.minCredits}`);
+    }
+  } catch (_) { /* fail open: keep last known state */ }
+  return credits.data;
+}
+function creditsSnapshot() {
+  const b = credits.data;
+  return {
+    remaining: b ? b.remainingCredits : null,
+    used: b ? b.usedCredits : null,
+    included: b ? b.includedCredits : null,
+    held: b ? b.heldCredits : null,
+    prepaid: b ? b.prepaidCredits : null,
+    nextResetAt: b ? b.nextResetAt : null,
+    circuitOpen: credits.circuitOpen,
+  };
+}
 
 // ------------------------------------------------------------ thread cache --
 // key = projectId|model|sha256(prior conversation) -> {threadId, lastAt, model}
@@ -363,6 +395,16 @@ async function createOrReuseThread(messages, model, extraThreadOpts = {}) {
 
 async function handleChat(req, res, body) {
   stats.requests++;
+  // Circuit breaker: refuse to start runs when credits are (near) exhausted.
+  // Re-check with force when a cached "open" verdict is older than the cache TTL.
+  await refreshCredits();
+  if (credits.circuitOpen) {
+    await refreshCredits(true);
+    if (credits.circuitOpen) {
+      stats.errors++;
+      return sendJson(res, 507, { error: { message: `hoplite credits exhausted: ${credits.data?.remainingCredits}$ remaining (min ${CFG.minCredits}$). Top up or raise minCredits.`, type: "insufficient_credits", credits: creditsSnapshot() } });
+    }
+  }
   const isStream = body.stream === true;
   let model = String(body.model || "");
   if (model.startsWith("hoplite/")) model = model.slice("hoplite/".length);
@@ -458,11 +500,17 @@ const server = http.createServer(async (req, res) => {
         const h = await hopFetch("GET", "/health", undefined, { timeoutMs: 5000 });
         upstream = { ok: h.status === 200 && h.json?.ok === true, version: h.json?.version };
       } catch (_) {}
-      return sendJson(res, 200, { ok: true, service: "hoplite-bridge", defaultModel: CFG.defaultModel, upstream, queueDepth: runQueue.length, activeRuns, threads: threads.size, stats });
+      await refreshCredits();
+      return sendJson(res, 200, { ok: true, service: "hoplite-bridge", defaultModel: CFG.defaultModel, upstream, credits: creditsSnapshot(), queueDepth: runQueue.length, activeRuns, threads: threads.size, stats });
     }
     if (req.method === "GET" && url.pathname === "/pool-status") {
       // 9Router serviceManager probe for category "Proxy" (tabbit convention).
-      return sendJson(res, 200, { ok: true, status: "ready", defaultModel: CFG.defaultModel, threads: threads.size, stats });
+      await refreshCredits();
+      return sendJson(res, 200, { ok: true, status: "ready", defaultModel: CFG.defaultModel, credits: creditsSnapshot(), threads: threads.size, stats });
+    }
+    if (req.method === "GET" && url.pathname === "/credits") {
+      await refreshCredits(true);
+      return sendJson(res, 200, { ok: true, credits: creditsSnapshot() });
     }
     if (req.method === "GET" && url.pathname === "/usage") {
       return sendJson(res, 200, { requests: stats.requests, tokens: stats.contentChars, runs: stats.runs, errors: stats.errors, threads: threads.size });
