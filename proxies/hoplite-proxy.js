@@ -41,17 +41,23 @@ function loadConfig() {
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); } catch (_) {}
   const apiKey = cfg.apiKey || process.env.HOPLITE_API_KEY || "";
-  const projectId = cfg.projectId || process.env.HOPLITE_PROJECT_ID || "";
-  if (!apiKey) { console.error("[hoplite] FATAL: no apiKey in", cfgPath); process.exit(1); }
-  if (!projectId) { console.error("[hoplite] FATAL: no projectId in", cfgPath); process.exit(1); }
+  const legacy = cfg.apiKey ? [{ name: "primary", apiKey: cfg.apiKey, projectId: cfg.projectId || "", minCredits: cfg.minCredits }] : [];
+  const keys = (Array.isArray(cfg.keys) && cfg.keys.length ? cfg.keys : legacy).map((k, i) => ({
+    name: k.name || `key${i}`,
+    apiKey: k.apiKey || "",
+    projectId: k.projectId || "",
+    minCredits: k.minCredits === undefined ? undefined : Number(k.minCredits),
+  })).filter(k => k.apiKey);
+  if (!keys.length) { console.error("[hoplite] FATAL: no keys in", cfgPath); process.exit(1); }
+  if (keys.some(k => !k.projectId)) { console.error("[hoplite] FATAL: every key needs a projectId (org-scoped)", cfgPath); process.exit(1); }
   return {
-    apiKey, projectId,
+    keys,
     port: Number(cfg.port || process.env.PORT || 8010),
     pollMs: Number(cfg.pollMs || 3000),
     runTimeoutMs: Number(cfg.runTimeoutMs || 15 * 60 * 1000),
     defaultModel: cfg.defaultModel || "z-ai/glm-5.3-flash",
     maxConcurrent: Number(cfg.maxConcurrent || 3), // Hoplite sandbox limit (nikita4a lesson)
-    minCredits: Number(cfg.minCredits ?? 1), // circuit breaker: reject new runs below this balance ($)
+    minCredits: Number(cfg.minCredits ?? 1), // default per-key breaker threshold ($)
     maxThreads: 100,
     threadTtlMs: 12 * 60 * 60 * 1000,
   };
@@ -75,41 +81,60 @@ function releaseRunSlot() {
 const BASE = "https://api.hoplite.sh";
 const stats = { requests: 0, runs: 0, errors: 0, contentChars: 0, startedAt: new Date().toISOString() };
 
-// ------------------------------------------------------------ credits monitor --
-// GET /api/billing/summary is undocumented (absent from openapi.json) but works
-// with the org hop_ key. Polled with a cache; drives lowCredits + circuit breaker.
-const credits = { data: null, at: 0, circuitOpen: false };
-async function refreshCredits(force = false) {
-  if (!force && credits.data && Date.now() - credits.at < 60000) return credits.data;
+// Bridge log file — serviceManager drops child stdout, so persist our own.
+const LOG_FILE = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router", "logs", "hoplite-bridge.log");
+function logLine(msg) {
   try {
-    const r = await hopFetch("GET", "/api/billing/summary", undefined, { timeoutMs: 10000 });
-    if (r.status === 200 && r.json?.ok && r.json?.billing) {
-      credits.data = r.json.billing;
-      credits.at = Date.now();
-      const remaining = Number(r.json.billing.remainingCredits);
-      credits.circuitOpen = Number.isFinite(remaining) && remaining < CFG.minCredits;
-      if (credits.circuitOpen) console.error(`[hoplite] CIRCUIT OPEN: remainingCredits ${remaining} < ${CFG.minCredits}`);
-    }
-  } catch (_) { /* fail open: keep last known state */ }
-  return credits.data;
-}
-function creditsSnapshot() {
-  const b = credits.data;
-  return {
-    remaining: b ? b.remainingCredits : null,
-    used: b ? b.usedCredits : null,
-    included: b ? b.includedCredits : null,
-    held: b ? b.heldCredits : null,
-    prepaid: b ? b.prepaidCredits : null,
-    nextResetAt: b ? b.nextResetAt : null,
-    circuitOpen: credits.circuitOpen,
-  };
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`);
+  } catch (_) {}
+  console.log(msg);
 }
 
+// ------------------------------------------------------------ credits monitor --
+// GET /api/billing/summary is undocumented (absent from openapi.json) but works
+// with the org hop_ key. Polled per-key with a cache; drives per-key breakers.
+const creditsByKey = CFG.keys.map(() => ({ data: null, at: 0, circuitOpen: false }));
+const minCreditsFor = (i) => CFG.keys[i].minCredits ?? CFG.minCredits;
+async function refreshCredits(idx, force = false) {
+  const st = creditsByKey[idx];
+  if (!force && st.data && Date.now() - st.at < 60000) return st.data;
+  try {
+    const r = await hopFetch("GET", "/api/billing/summary", undefined, { timeoutMs: 10000, apiKey: CFG.keys[idx].apiKey });
+    if (r.status === 200 && r.json?.ok && r.json?.billing) {
+      st.data = r.json.billing;
+      st.at = Date.now();
+      const remaining = Number(r.json.billing.remainingCredits);
+      st.circuitOpen = Number.isFinite(remaining) && remaining < minCreditsFor(idx);
+      if (st.circuitOpen) logLine(`CIRCUIT OPEN key[${idx}] ${CFG.keys[idx].name}: remaining ${remaining} < ${minCreditsFor(idx)}`);
+    } else if (r.status === 401) {
+      st.circuitOpen = true; // revoked key
+      logLine(`key[${idx}] ${CFG.keys[idx].name}: 401 invalid — circuit open`);
+    }
+  } catch (_) { /* fail open: keep last known state */ }
+  return st.data;
+}
+async function refreshAllCredits(force = false) {
+  await Promise.all(CFG.keys.map((_, i) => refreshCredits(i, force)));
+}
+function creditsSnapshot() {
+  return CFG.keys.map((k, i) => ({
+    key: k.name,
+    remaining: creditsByKey[i].data ? creditsByKey[i].data.remainingCredits : null,
+    used: creditsByKey[i].data ? creditsByKey[i].data.usedCredits : null,
+    included: creditsByKey[i].data ? creditsByKey[i].data.includedCredits : null,
+    held: creditsByKey[i].data ? creditsByKey[i].data.heldCredits : null,
+    nextResetAt: creditsByKey[i].data ? creditsByKey[i].data.nextResetAt : null,
+    circuitOpen: creditsByKey[i].circuitOpen,
+  }));
+}
+function allKeysOpen() { return creditsByKey.every(s => s.circuitOpen); }
+
 // ------------------------------------------------------------ thread cache --
-// key = projectId|model|sha256(prior conversation) -> {threadId, lastAt, model}
+// key = keyIdx|projectId|model|sha256(prior conversation) -> {threadId, lastAt}
+// Threads are org-scoped — the cache MUST be partitioned per key.
 const threads = new Map();
-function cacheKey(model, priorHash) { return `${CFG.projectId}|${model}|${priorHash}`; }
+function cacheKey(keyIdx, model, priorHash) { return `${keyIdx}|${CFG.keys[keyIdx].projectId}|${model}|${priorHash}`; }
 function cacheGet(k) {
   const t = threads.get(k);
   if (!t) return null;
@@ -127,13 +152,13 @@ function cachePut(k, threadId) {
 }
 
 // ------------------------------------------------------------------ fetch --
-function hopFetch(method, urlPath, body, { timeoutMs = 30000, headers = {} } = {}) {
+function hopFetch(method, urlPath, body, { timeoutMs = 30000, headers = {}, apiKey } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const req = https.request(`${BASE}${urlPath}`, {
       method,
       headers: {
-        "Authorization": `Bearer ${CFG.apiKey}`,
+        "Authorization": `Bearer ${apiKey || (CFG.keys[0] && CFG.keys[0].apiKey) || ""}`,
         "Accept": "application/json",
         ...(payload ? { "Content-Type": "application/json", "Content-Length": payload.length } : {}),
         ...headers,
@@ -195,31 +220,42 @@ function priorSignature(messages) {
   return crypto.createHash("sha256").update(JSON.stringify(prior)).digest("hex");
 }
 
-function continuationKey(model, messages, answer) {
+function continuationKey(keyIdx, model, messages, answer) {
   // Key for the NEXT turn: its prior = this conversation + our answer as last
   // assistant msg. Storing it lets follow-up turns append to the same thread
   // instead of re-sending the whole transcript into a fresh thread.
   const prior = messages.map((m) => [m.role, contentToText(m.content)]);
   prior.push(["assistant", answer]);
-  return cacheKey(model, crypto.createHash("sha256").update(JSON.stringify(prior)).digest("hex"));
+  return cacheKey(keyIdx, model, crypto.createHash("sha256").update(JSON.stringify(prior)).digest("hex"));
 }
 
 // ------------------------------------------------------------------ models --
-let modelCache = { at: 0, ids: [] };
+// Per-key catalogs (org-scoped: friend orgs see 7 models, ours 17). Union is
+// exposed via /v1/models; key selection prefers keys whose org has the model.
+const catalogs = CFG.keys.map(() => ({ ids: null, at: 0 }));
 const FALLBACK_MODELS = ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-8",
   "claude-sonnet-5", "claude-haiku-4-5", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
   "gpt-5.5", "gpt-5.3-codex", "meta/muse-spark-1.3", "moonshotai/kimi-k3", "z-ai/glm-5.3",
   "z-ai/glm-5.3-flash", "deepseek/deepseek-v4-flash-0731"];
 
+async function catalogFor(idx, force = false) {
+  const c = catalogs[idx];
+  if (!force && c.ids && Date.now() - c.at < 5 * 60 * 1000) return c.ids;
+  try {
+    const r = await hopFetch("GET", "/api/model-providers", undefined, { timeoutMs: 15000, apiKey: CFG.keys[idx].apiKey });
+    if (r.status === 200 && Array.isArray(r.json?.models)) {
+      c.ids = r.json.models.map((m) => m.id).filter(Boolean);
+      c.at = Date.now();
+    }
+  } catch (_) {}
+  return c.ids;
+}
 async function listModels() {
-  if (Date.now() - modelCache.at < 5 * 60 * 1000 && modelCache.ids.length) return modelCache.ids;
-  const r = await hopFetch("GET", "/api/model-providers", undefined);
-  if (r.status === 200 && Array.isArray(r.json?.models) && r.json.models.length) {
-    modelCache = { at: Date.now(), ids: r.json.models.map((m) => m.id).filter(Boolean) };
-    return modelCache.ids;
-  }
-  console.error("[hoplite] model-providers fetch failed:", r.status, r.text?.slice(0, 200));
-  return FALLBACK_MODELS;
+  await Promise.all(CFG.keys.map((_, i) => catalogFor(i)));
+  const union = new Set();
+  for (const c of catalogs) for (const id of c.ids || []) union.add(id);
+  if (!union.size) FALLBACK_MODELS.forEach((m) => union.add(m));
+  return [...union];
 }
 
 // ------------------------------------------------------------- run lifecycle --
@@ -247,7 +283,8 @@ function classifyThreadState(thread) {
  * Drive one run to completion. Returns {ok, answer, reasoning, error, threadId}.
  * onDelta(type, text) — live streaming callback (type: "reasoning" | "content").
  */
-async function driveRun(threadId, userMsgId, onDelta) {
+async function driveRun(keyIdx, threadId, userMsgId, onDelta) {
+  const apiKey = CFG.keys[keyIdx].apiKey;
   const started = Date.now();
   const seen = new Set([userMsgId].filter(Boolean));
   let answer = "";
@@ -260,7 +297,7 @@ async function driveRun(threadId, userMsgId, onDelta) {
   while (Date.now() - started < CFG.runTimeoutMs) {
     let tr;
     try {
-      tr = await hopFetch("GET", `/api/threads/${threadId}`);
+      tr = await hopFetch("GET", `/api/threads/${threadId}`, undefined, { apiKey });
       pollFails = 0;
     } catch (e) {
       if (++pollFails > 8) return { ok: false, error: `poll transport failure: ${e.message}` };
@@ -277,7 +314,7 @@ async function driveRun(threadId, userMsgId, onDelta) {
     // New messages → stream deltas (thinking/tool/status as reasoning progress).
     let mr;
     try {
-      mr = await hopFetch("GET", `/api/threads/${threadId}/messages?limit=500`);
+      mr = await hopFetch("GET", `/api/threads/${threadId}/messages?limit=500`, undefined, { apiKey });
     } catch (e) { /* tolerate; next poll retries */ }
     if (mr?.status === 200 && Array.isArray(mr.json?.messages)) {
       const fresh = mr.json.messages.filter((m) => !seen.has(m.id));
@@ -341,76 +378,116 @@ function chunkText(str, size = 240) {
   return out;
 }
 
+/**
+ * Multi-key thread create/append. Keys are org-scoped (each has its own
+ * projectId); rotation prefers keys whose org catalog has the requested model,
+ * skips credit-exhausted keys, and fails over to the next key on
+ * insufficient_credits / invalid-model / project errors.
+ * Returns { keyIdx, threadId, userMsgId, fresh }.
+ */
 async function createOrReuseThread(messages, model, extraThreadOpts = {}) {
-  const priorHash = priorSignature(messages);
-  const key = cacheKey(model, priorHash);
-  const cached = cacheGet(key);
   const lastMsg = messages[messages.length - 1] || {};
   const userText = contentToText(lastMsg.content).trim() || "(empty message)";
 
-  if (cached) {
-    const cid = crypto.randomUUID();
-    const r = await hopFetch("POST", `/api/threads/${cached}/messages`, {
-      content: userText, clientMessageId: cid,
-      metadata: model ? { model } : undefined,
-    });
-    if (r.status === 201 && r.json?.ok) {
-      const userMsgId = r.json?.message?.id || null;
-      return { threadId: cached, userMsgId, fresh: false };
-    }
-    console.error("[hoplite] append to cached thread failed:", r.status, r.text?.slice(0, 200), "→ recreating thread");
+  // Prefer keys whose org catalog actually has the model; keep config order otherwise.
+  const order = CFG.keys.map((_, i) => i).filter(i => !creditsByKey[i].circuitOpen);
+  const scored = [];
+  for (const i of order) {
+    const ids = catalogs[i].ids;
+    scored.push({ i, hasModel: !ids || ids.includes(model) }); // unknown catalog → neutral-true
+  }
+  scored.sort((a, b) => (b.hasModel ? 1 : 0) - (a.hasModel ? 1 : 0));
+  const keyOrder = scored.map(s => s.i);
+  if (!keyOrder.length) {
+    await refreshAllCredits(true);
+    throw Object.assign(new Error("all hoplite keys exhausted (credits or revoked)"), { status: 507 });
   }
 
-  // Fresh thread: full transcript as prompt. Idempotent retry on transport error.
-  const prompt = `${flattenConversation(messages.slice(0, -1))}\n\n### User (latest)\n${userText}`.trim();
-  const title = `[bridge] ${userText.replace(/\s+/g, " ").slice(0, 60)}`;
-  const opId = crypto.randomUUID();
-  let r;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      r = await hopFetch("POST", "/api/threads", {
-        projectId: CFG.projectId, prompt, title, model: model || undefined, clientOperationId: opId,
-        ...(extraThreadOpts.speed ? { speed: extraThreadOpts.speed } : {}),
-        ...(extraThreadOpts.reasoning ? { reasoning: extraThreadOpts.reasoning } : {}),
-      }, { timeoutMs: 60000 });
-      if (r.status === 201) break;
-      // sandbox_limit / capacity errors: backoff and retry (nikita4a lesson)
-      const errText = String(r.json?.error || r.text || "").toLowerCase();
-      if (r.status < 500 && !/sandbox|capacity|limit|retained|busy/.test(errText)) break; // non-retryable client error
-      await sleep(4000 * (attempt + 1));
-    } catch (e) {
-      if (attempt === 3) throw new Error(`thread create transport failure: ${e.message}`);
-      await sleep(1500);
+  const priorHash = priorSignature(messages);
+  let lastErr = null;
+
+  for (const keyIdx of keyOrder) {
+    const apiKey = CFG.keys[keyIdx].apiKey;
+    const key = cacheKey(keyIdx, model, priorHash);
+    const cached = cacheGet(key);
+
+    if (cached) {
+      const cid = crypto.randomUUID();
+      const r = await hopFetch("POST", `/api/threads/${cached}/messages`, {
+        content: userText, clientMessageId: cid,
+        metadata: model ? { model } : undefined,
+      }, { apiKey });
+      if (r.status === 201 && r.json?.ok) {
+        const userMsgId = r.json?.message?.id || null;
+        return { keyIdx, threadId: cached, userMsgId, fresh: false };
+      }
+      if (r.status === 402 || String(r.json?.error || "").includes("insufficient")) {
+        creditsByKey[keyIdx].circuitOpen = true;
+        logLine(`key[${keyIdx}] ${CFG.keys[keyIdx].name} exhausted mid-request → next key`);
+        continue;
+      }
+      logLine(`append to cached thread failed: HTTP ${r.status} ${r.text?.slice(0, 150)} → recreating`);
+    }
+
+    // Fresh thread: full transcript as prompt. Idempotent retry on transport error.
+    const prompt = `${flattenConversation(messages.slice(0, -1))}\n\n### User (latest)\n${userText}`.trim();
+    const title = `[bridge] ${userText.replace(/\s+/g, " ").slice(0, 60)}`;
+    const opId = crypto.randomUUID();
+    let r = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        r = await hopFetch("POST", "/api/threads", {
+          projectId: CFG.keys[keyIdx].projectId, prompt, title, model: model || undefined, clientOperationId: opId,
+          ...(extraThreadOpts.speed ? { speed: extraThreadOpts.speed } : {}),
+          ...(extraThreadOpts.reasoning ? { reasoning: extraThreadOpts.reasoning } : {}),
+        }, { timeoutMs: 60000, apiKey });
+        if (r.status === 201) break;
+        const errText = String(r.json?.error || r.text || "").toLowerCase();
+        if (errText.includes("insufficient")) break; // failover to next key, no retry on same key
+        // sandbox_limit / capacity errors: backoff and retry (nikita4a lesson)
+        if (r.status < 500 && !/sandbox|capacity|limit|retained|busy/.test(errText)) break; // non-retryable client error
+        await sleep(4000 * (attempt + 1));
+      } catch (e) {
+        if (attempt === 3) { lastErr = new Error(`thread create transport failure: ${e.message}`); r = null; break; }
+        await sleep(1500);
+      }
+    }
+    if (r && r.status === 201 && r.json?.ok && r.json?.thread?.id) {
+      const threadId = r.json.thread.id;
+      cachePut(key, threadId);
+      logLine(`key[${keyIdx}] ${CFG.keys[keyIdx].name} created thread ${threadId} (model=${model || "default"})`);
+      const userMsgId = r.json?.message?.id || r.json?.initialMessageId || null;
+      return { keyIdx, threadId, userMsgId, fresh: true };
+    }
+    if (r) {
+      const errText = String(r.json?.error || "").toLowerCase();
+      logLine(`key[${keyIdx}] ${CFG.keys[keyIdx].name} create failed: HTTP ${r.status} ${r.json?.error || r.text?.slice(0, 150)} → next key`);
+      if (r.status === 402 || errText.includes("insufficient")) creditsByKey[keyIdx].circuitOpen = true;
+      if (r.status === 401) creditsByKey[keyIdx].circuitOpen = true; // revoked
+      lastErr = new Error(`thread create failed on ${CFG.keys[keyIdx].name}: HTTP ${r.status} ${r.json?.error || r.text?.slice(0, 120)}`);
+      continue; // failover to next key
     }
   }
-  if (!r || r.status !== 201 || !r.json?.ok || !r.json?.thread?.id) {
-    const detail = r ? `HTTP ${r.status} ${r.json?.error || r.text?.slice(0, 200)} (req ${r.requestId})` : "no response";
-    throw Object.assign(new Error(`thread create failed: ${detail}`), { status: r?.status || 502 });
-  }
-  const threadId = r.json.thread.id;
-  cachePut(key, threadId);
-  const userMsgId = r.json?.message?.id || r.json?.initialMessageId || null;
-  return { threadId, userMsgId, fresh: true };
+  throw lastErr || Object.assign(new Error("all hoplite keys failed"), { status: 502 });
 }
 
 async function handleChat(req, res, body) {
   stats.requests++;
-  // Circuit breaker: refuse to start runs when credits are (near) exhausted.
-  // Re-check with force when a cached "open" verdict is older than the cache TTL.
-  await refreshCredits();
-  if (credits.circuitOpen) {
-    await refreshCredits(true);
-    if (credits.circuitOpen) {
+  // Per-key circuit breakers: only 507 when EVERY key is exhausted/revoked.
+  await refreshAllCredits();
+  if (allKeysOpen()) {
+    await refreshAllCredits(true);
+    if (allKeysOpen()) {
       stats.errors++;
-      return sendJson(res, 507, { error: { message: `hoplite credits exhausted: ${credits.data?.remainingCredits}$ remaining (min ${CFG.minCredits}$). Top up or raise minCredits.`, type: "insufficient_credits", credits: creditsSnapshot() } });
+      return sendJson(res, 507, { error: { message: "all hoplite keys exhausted (credits or revoked). Top up or adjust keys/minCredits.", type: "insufficient_credits", credits: creditsSnapshot() } });
     }
   }
   const isStream = body.stream === true;
   let model = String(body.model || "");
   if (model.startsWith("hoplite/")) model = model.slice("hoplite/".length);
-  const known = modelCache.ids.length ? modelCache.ids : FALLBACK_MODELS;
-  if (!model || !known.includes(model)) {
-    console.error(`[hoplite] model "${model}" not in catalog → default ${CFG.defaultModel}`);
+  const union = await listModels();
+  if (!model || !union.includes(model)) {
+    console.error(`[hoplite] model "${model}" not in any catalog → default ${CFG.defaultModel}`);
     model = CFG.defaultModel;
   }
   const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -432,18 +509,19 @@ async function handleChat(req, res, body) {
   stats.runs++;
 
   if (!isStream) {
-    const out = await driveRun(t.threadId, t.userMsgId, null).finally(releaseRunSlot);
+    const out = await driveRun(t.keyIdx, t.threadId, t.userMsgId, null).finally(releaseRunSlot);
     if (!out.ok) {
       stats.errors++;
-      threads.delete(cacheKey(model, priorSignature(messages))); // dead thread → don't reuse
+      threads.delete(cacheKey(t.keyIdx, model, priorSignature(messages))); // dead thread → don't reuse
       return sendJson(res, 502, { error: { message: out.error, type: "upstream_error", hoplite_thread: out.threadId } });
     }
     stats.contentChars += out.answer.length;
-    cachePut(continuationKey(model, messages, out.answer), out.threadId);
+    cachePut(continuationKey(t.keyIdx, model, messages, out.answer), out.threadId);
     return sendJson(res, 200, {
       id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model,
       choices: [{ index: 0, message: { role: "assistant", content: out.answer }, finish_reason: "stop" }],
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      hoplite_key: CFG.keys[t.keyIdx].name,
     });
   }
 
@@ -457,7 +535,7 @@ async function handleChat(req, res, body) {
   let closed = false;
   res.on("close", () => { closed = true; clearInterval(heartbeat); });
 
-  const out = await driveRun(t.threadId, t.userMsgId, (type, text) => {
+  const out = await driveRun(t.keyIdx, t.threadId, t.userMsgId, (type, text) => {
     if (closed) return;
     if (type === "reasoning") {
       for (const piece of chunkText(text)) res.write(sseChunk(model, id, { reasoning_content: piece }));
@@ -477,7 +555,7 @@ async function handleChat(req, res, body) {
     return res.end();
   }
   stats.contentChars += out.answer.length;
-  cachePut(continuationKey(model, messages, out.answer), out.threadId);
+  cachePut(continuationKey(t.keyIdx, model, messages, out.answer), out.threadId);
   res.write(sseChunk(model, id, {}, "stop"));
   res.write("data: [DONE]\n\n");
   res.end();
@@ -500,16 +578,16 @@ const server = http.createServer(async (req, res) => {
         const h = await hopFetch("GET", "/health", undefined, { timeoutMs: 5000 });
         upstream = { ok: h.status === 200 && h.json?.ok === true, version: h.json?.version };
       } catch (_) {}
-      await refreshCredits();
-      return sendJson(res, 200, { ok: true, service: "hoplite-bridge", defaultModel: CFG.defaultModel, upstream, credits: creditsSnapshot(), queueDepth: runQueue.length, activeRuns, threads: threads.size, stats });
+      await refreshAllCredits();
+      return sendJson(res, 200, { ok: true, service: "hoplite-bridge", defaultModel: CFG.defaultModel, keys: CFG.keys.map(k => k.name), upstream, credits: creditsSnapshot(), queueDepth: runQueue.length, activeRuns, threads: threads.size, stats });
     }
     if (req.method === "GET" && url.pathname === "/pool-status") {
       // 9Router serviceManager probe for category "Proxy" (tabbit convention).
-      await refreshCredits();
+      await refreshAllCredits();
       return sendJson(res, 200, { ok: true, status: "ready", defaultModel: CFG.defaultModel, credits: creditsSnapshot(), threads: threads.size, stats });
     }
     if (req.method === "GET" && url.pathname === "/credits") {
-      await refreshCredits(true);
+      await refreshAllCredits(true);
       return sendJson(res, 200, { ok: true, credits: creditsSnapshot() });
     }
     if (req.method === "GET" && url.pathname === "/usage") {
@@ -536,5 +614,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(CFG.port, "127.0.0.1", () => {
-  console.log(`[hoplite] bridge on http://127.0.0.1:${CFG.port} project=${CFG.projectId} defaultModel=${CFG.defaultModel}`);
+  console.log(`[hoplite] bridge on http://127.0.0.1:${CFG.port} keys=[${CFG.keys.map(k => k.name).join(", ")}] defaultModel=${CFG.defaultModel}`);
 });
