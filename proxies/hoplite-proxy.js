@@ -49,12 +49,27 @@ function loadConfig() {
     port: Number(cfg.port || process.env.PORT || 8010),
     pollMs: Number(cfg.pollMs || 3000),
     runTimeoutMs: Number(cfg.runTimeoutMs || 15 * 60 * 1000),
-    defaultModel: cfg.defaultModel || "gpt-5.6-terra",
+    defaultModel: cfg.defaultModel || "z-ai/glm-5.3-flash",
+    maxConcurrent: Number(cfg.maxConcurrent || 3), // Hoplite sandbox limit (nikita4a lesson)
     maxThreads: 100,
     threadTtlMs: 12 * 60 * 60 * 1000,
   };
 }
 const CFG = loadConfig();
+
+// Serialize agent runs — Hoplite caps concurrent sandboxes; excess requests
+// queue here instead of failing on upstream sandbox_limit errors.
+const runQueue = []; // FIFO of {resolve}
+let activeRuns = 0;
+function acquireRunSlot() {
+  if (activeRuns < CFG.maxConcurrent) { activeRuns++; return Promise.resolve(); }
+  return new Promise((resolve) => runQueue.push({ resolve }));
+}
+function releaseRunSlot() {
+  const next = runQueue.shift();
+  if (next) next.resolve();
+  else activeRuns = Math.max(0, activeRuns - 1);
+}
 
 const BASE = "https://api.hoplite.sh";
 const stats = { requests: 0, runs: 0, errors: 0, contentChars: 0, startedAt: new Date().toISOString() };
@@ -294,7 +309,7 @@ function chunkText(str, size = 240) {
   return out;
 }
 
-async function createOrReuseThread(messages, model) {
+async function createOrReuseThread(messages, model, extraThreadOpts = {}) {
   const priorHash = priorSignature(messages);
   const key = cacheKey(model, priorHash);
   const cached = cacheGet(key);
@@ -319,14 +334,20 @@ async function createOrReuseThread(messages, model) {
   const title = `[bridge] ${userText.replace(/\s+/g, " ").slice(0, 60)}`;
   const opId = crypto.randomUUID();
   let r;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       r = await hopFetch("POST", "/api/threads", {
         projectId: CFG.projectId, prompt, title, model: model || undefined, clientOperationId: opId,
+        ...(extraThreadOpts.speed ? { speed: extraThreadOpts.speed } : {}),
+        ...(extraThreadOpts.reasoning ? { reasoning: extraThreadOpts.reasoning } : {}),
       }, { timeoutMs: 60000 });
-      break;
+      if (r.status === 201) break;
+      // sandbox_limit / capacity errors: backoff and retry (nikita4a lesson)
+      const errText = String(r.json?.error || r.text || "").toLowerCase();
+      if (r.status < 500 && !/sandbox|capacity|limit|retained|busy/.test(errText)) break; // non-retryable client error
+      await sleep(4000 * (attempt + 1));
     } catch (e) {
-      if (attempt === 1) throw new Error(`thread create transport failure: ${e.message}`);
+      if (attempt === 3) throw new Error(`thread create transport failure: ${e.message}`);
       await sleep(1500);
     }
   }
@@ -356,15 +377,20 @@ async function handleChat(req, res, body) {
 
   let t;
   try {
-    t = await createOrReuseThread(messages, model);
+    await acquireRunSlot();
+    t = await createOrReuseThread(messages, model, {
+      speed: body.speed === "fast" ? "fast" : undefined,
+      reasoning: body.reasoning_effort ? { mode: body.reasoning_effort } : undefined,
+    });
   } catch (e) {
     stats.errors++;
+    releaseRunSlot();
     return sendJson(res, e.status || 502, { error: { message: String(e.message || e), type: "upstream_error" } });
   }
   stats.runs++;
 
   if (!isStream) {
-    const out = await driveRun(t.threadId, t.userMsgId, null);
+    const out = await driveRun(t.threadId, t.userMsgId, null).finally(releaseRunSlot);
     if (!out.ok) {
       stats.errors++;
       threads.delete(cacheKey(model, priorSignature(messages))); // dead thread → don't reuse
@@ -396,7 +422,7 @@ async function handleChat(req, res, body) {
     } else {
       for (const piece of chunkText(text)) res.write(sseChunk(model, id, { content: piece }));
     }
-  });
+  }).finally(releaseRunSlot);
   clearInterval(heartbeat);
   if (closed) return;
   if (!out.ok) {
@@ -426,7 +452,13 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   try {
     if (req.method === "GET" && url.pathname === "/health") {
-      return sendJson(res, 200, { ok: true, service: "hoplite-bridge", defaultModel: CFG.defaultModel, threads: threads.size, stats });
+      // Upstream probe: report degraded if Hoplite itself is unreachable.
+      let upstream = { ok: false };
+      try {
+        const h = await hopFetch("GET", "/health", undefined, { timeoutMs: 5000 });
+        upstream = { ok: h.status === 200 && h.json?.ok === true, version: h.json?.version };
+      } catch (_) {}
+      return sendJson(res, 200, { ok: true, service: "hoplite-bridge", defaultModel: CFG.defaultModel, upstream, queueDepth: runQueue.length, activeRuns, threads: threads.size, stats });
     }
     if (req.method === "GET" && url.pathname === "/pool-status") {
       // 9Router serviceManager probe for category "Proxy" (tabbit convention).
