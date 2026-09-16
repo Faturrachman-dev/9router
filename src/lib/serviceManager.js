@@ -77,6 +77,17 @@ const DEFAULT_SERVICES = [
     autostart: true,
   },
   {
+    id: "hoplite-bridge",
+    name: "Hoplite Bridge :8010",
+    category: "Proxy",
+    port: 8010,
+    cwd: wp("C:", "Users", "hafiz", "tools", "9router", "proxies"),
+    cmd: ["node", "hoplite-proxy.js"],
+    env: { PORT: "8010" },
+    enabled: true,
+    autostart: true,
+  },
+  {
     id: "morph-proxy",
     name: "Morph Proxy :8790",
     category: "Proxy",
