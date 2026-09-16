@@ -426,11 +426,11 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   try {
     if (req.method === "GET" && url.pathname === "/health") {
-      return sendJson(res, 200, { ok: true, service: "hoplite-bridge", threads: threads.size, stats });
+      return sendJson(res, 200, { ok: true, service: "hoplite-bridge", defaultModel: CFG.defaultModel, threads: threads.size, stats });
     }
     if (req.method === "GET" && url.pathname === "/pool-status") {
       // 9Router serviceManager probe for category "Proxy" (tabbit convention).
-      return sendJson(res, 200, { ok: true, status: "ready", threads: threads.size, stats });
+      return sendJson(res, 200, { ok: true, status: "ready", defaultModel: CFG.defaultModel, threads: threads.size, stats });
     }
     if (req.method === "GET" && url.pathname === "/usage") {
       return sendJson(res, 200, { requests: stats.requests, tokens: stats.contentChars, runs: stats.runs, errors: stats.errors, threads: threads.size });
